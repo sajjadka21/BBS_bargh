@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   check-outages:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows]
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -31,6 +31,7 @@ jobs:
         run: python khamooshi_notify.py
 
       - name: Commit updated state files (if changed)
+        shell: bash
         run: |
           git config user.name "khamooshi-bot"
           git config user.email "actions@github.com"
