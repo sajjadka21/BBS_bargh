@@ -29,10 +29,15 @@ jobs:
         run: python khamooshi_notify.py
 
       - name: Commit updated state files (if changed)
-        shell: bash
+        shell: pwsh
         run: |
           git config user.name "khamooshi-bot"
           git config user.email "actions@github.com"
-          git add offset.json state_*.json 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "Update outage state [skip ci]"
-          git push
+          git add -A
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Update outage state [skip ci]"
+            git push
+          } else {
+            Write-Host "No state changes to commit."
+          }
