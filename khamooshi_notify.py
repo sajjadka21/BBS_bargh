@@ -49,6 +49,19 @@ CITIES = [
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "PUT_YOUR_CHAT_ID_HERE")
 
+# Telegram is blocked in Iran, so calls to api.telegram.org must go through a
+# local VPN/proxy app (V2rayN, Nekoray, Clash, ...). The khamooshi site, on
+# the other hand, must be reached DIRECTLY (no proxy) since it needs an
+# Iranian-looking connection. Set TELEGRAM_PROXY to your app's local SOCKS5
+# listen address (check your VPN app's settings for "Local Server" /
+# "Inbound" / "Listen Port" -- commonly 127.0.0.1:10808 for SOCKS5).
+TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "socks5h://127.0.0.1:10808")
+TELEGRAM_PROXIES = {"http": TELEGRAM_PROXY, "https": TELEGRAM_PROXY}
+
+# Explicitly force NO proxy for the khamooshi site, overriding any
+# system-wide HTTP_PROXY/HTTPS_PROXY env vars the VPN app might set.
+DIRECT_PROXIES = {"http": None, "https": None}
+
 DATA_DIR = os.path.dirname(__file__)
 OFFSET_FILE = os.path.join(DATA_DIR, "offset.json")
 
@@ -93,7 +106,8 @@ def city_by_key(key):
 # --------------------------- TELEGRAM SIDE --------------------------------
 
 def tg_get_updates(offset):
-    r = requests.get(f"{TELEGRAM_API}/getUpdates", params={"offset": offset, "timeout": 0}, timeout=20)
+    r = requests.get(f"{TELEGRAM_API}/getUpdates", params={"offset": offset, "timeout": 0},
+                      proxies=TELEGRAM_PROXIES, timeout=20)
     r.raise_for_status()
     return r.json().get("result", [])
 
@@ -102,14 +116,15 @@ def tg_send_message(chat_id, text, with_buttons=True):
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if with_buttons:
         data["reply_markup"] = json.dumps(city_buttons_keyboard())
-    r = requests.post(f"{TELEGRAM_API}/sendMessage", data=data, timeout=20)
+    r = requests.post(f"{TELEGRAM_API}/sendMessage", data=data, proxies=TELEGRAM_PROXIES, timeout=20)
     if not r.ok:
         print("sendMessage failed:", r.status_code, r.text)
 
 
 def tg_answer_callback(callback_query_id, text=""):
     requests.post(f"{TELEGRAM_API}/answerCallbackQuery",
-                  data={"callback_query_id": callback_query_id, "text": text}, timeout=20)
+                  data={"callback_query_id": callback_query_id, "text": text},
+                  proxies=TELEGRAM_PROXIES, timeout=20)
 
 
 def city_buttons_keyboard():
@@ -154,7 +169,7 @@ def process_button_presses():
 # --------------------------- SITE SCRAPING --------------------------------
 
 def get_fresh_tokens(session: requests.Session):
-    resp = session.get(BASE_URL, timeout=20)
+    resp = session.get(BASE_URL, proxies=DIRECT_PROXIES, timeout=20)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -216,7 +231,7 @@ def search_outages(session: requests.Session, tokens: dict, city_id: str, area_i
         "__ASYNCPOST": "true",
         "ctl00$ContentPlaceHolder1$btnSearchOutage": "جستجو",
     }
-    resp = session.post(BASE_URL, headers=HEADERS_COMMON, data=data, timeout=20)
+    resp = session.post(BASE_URL, headers=HEADERS_COMMON, data=data, proxies=DIRECT_PROXIES, timeout=20)
     resp.raise_for_status()
     return resp.text
 
