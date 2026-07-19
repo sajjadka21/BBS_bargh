@@ -4,27 +4,42 @@ Daily power-outage (khamooshi) checker for khamooshi.maztozi.ir -- multi-city
 ==============================================================================
 
 Tracks 2+ شهرستان/امور برق combos and sends everything to the SAME Telegram
-chat. Every notification about a *new* outage also comes with two inline
-buttons ("نمایش بابلسر" / "نمایش ساری") that let you pull up the full,
-already-fetched current list for either city on demand -- pressing a button
-does NOT trigger a new website fetch, it just reads what's already stored
-in that city's state file.
+chat. Every "new outage" notification comes with one button per city
+("نمایش بابلسر" / "نمایش ساری"). The flow is pure buttons, no commands:
+
+    [نمایش بابلسر]  [نمایش ساری]
+            |
+            v  (pressing a city button)
+    [🔍 جستجو]   [📋 نمایش همه]
+       |                 |
+       v                 v
+  bot asks for a    every stored row for
+  keyword; your     that city is sent as
+  next message is   its OWN message (one
+  used as the       block = one message)
+  search term;
+  matches are each
+  sent as their own
+  message too
+
+Nothing here triggers a new website fetch -- every button/search reply is
+answered purely from that city's already-stored state file.
 
 Because this runs as a scheduled GitHub Actions job (not a live/long-running
-bot), button presses are only answered the *next* time the job runs (per the
-cron schedule in .github/workflows/notify.yml), not instantly.
+bot), button presses and search replies are only answered the *next* time
+the job runs (per the cron schedule in .github/workflows/notify.yml), not
+instantly.
 
 Flow on every run:
-  1. Poll Telegram getUpdates (since the last processed update_id) to see if
-     you pressed a "نمایش ..." button since the last run. If so, reply with
-     that city's full current list (from its state file -- no re-fetch).
+  1. Poll Telegram getUpdates (since the last processed update_id) for any
+     button presses or pending search replies, and answer them.
   2. For every configured city, fetch today's outage list, diff against its
      stored state, and if there are new items, send them to the chat (with
-     the same "نمایش ..." buttons attached).
+     the city menu buttons attached).
 
 Requirements
 ------------
-    pip install requests beautifulsoup4 jdatetime --break-system-packages
+    pip install requests beautifulsoup4 jdatetime PySocks --break-system-packages
 """
 
 import os
@@ -112,13 +127,67 @@ def tg_get_updates(offset):
     return r.json().get("result", [])
 
 
-def tg_send_message(chat_id, text, with_buttons=True):
-    data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if with_buttons:
-        data["reply_markup"] = json.dumps(city_buttons_keyboard())
-    r = requests.post(f"{TELEGRAM_API}/sendMessage", data=data, proxies=TELEGRAM_PROXIES, timeout=20)
-    if not r.ok:
-        print("sendMessage failed:", r.status_code, r.text)
+def _chunk_lines(lines, max_len=3500):
+    """Group a list of text blocks into chunks whose total length stays
+    under max_len, without ever splitting a block (so no HTML tag is cut
+    in half)."""
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        if current and current_len + len(line) > max_len:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += len(line)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
+PENDING_FILE = os.path.join(DATA_DIR, "pending_search.json")
+
+
+def city_menu_keyboard():
+    """Top-level: one button per city."""
+    row = [{"text": f"نمایش {c['label']}", "callback_data": f"city:{c['key']}"} for c in CITIES]
+    return {"inline_keyboard": [row]}
+
+
+def city_action_keyboard(city_key):
+    """After picking a city: search or show-everything."""
+    return {"inline_keyboard": [[
+        {"text": "🔍 جستجو", "callback_data": f"search:{city_key}"},
+        {"text": "📋 نمایش همه", "callback_data": f"all:{city_key}"},
+    ]]}
+
+
+def tg_send_message(chat_id, lines, keyboard=None):
+    """`lines` is a list of text blocks (e.g. one per outage row). Telegram
+    caps messages at ~4096 chars, so we group blocks into chunks that stay
+    under that limit. Only the LAST chunk gets any inline keyboard attached."""
+    if isinstance(lines, str):
+        lines = [lines]
+    chunks = _chunk_lines(lines)
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        data = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+        if keyboard and is_last:
+            data["reply_markup"] = json.dumps(keyboard)
+        r = requests.post(f"{TELEGRAM_API}/sendMessage", data=data, proxies=TELEGRAM_PROXIES, timeout=20)
+        if not r.ok:
+            print("sendMessage failed:", r.status_code, r.text)
+
+
+def tg_send_each_row_separately(chat_id, rows, city_label):
+    """Send every outage row as its OWN message (one bloc = one message)."""
+    if not rows:
+        tg_send_message(chat_id, [f"فعلاً هیچ خاموشی ثبت‌شده‌ای برای <b>{city_label}</b> نداریم."])
+        return
+    for r in rows:
+        block = f"🏙 {city_label}\n📍 {r['address']}\n🕒 {r['from']} تا {r['to']} — {r['date']} ({r['type']})"
+        tg_send_message(chat_id, [block])
 
 
 def tg_answer_callback(callback_query_id, text=""):
@@ -127,26 +196,24 @@ def tg_answer_callback(callback_query_id, text=""):
                   proxies=TELEGRAM_PROXIES, timeout=20)
 
 
-def city_buttons_keyboard():
-    row = [{"text": f"نمایش {c['label']}", "callback_data": f"show:{c['key']}"} for c in CITIES]
-    return {"inline_keyboard": [row]}
-
-
-def format_city_list(label, rows):
-    if not rows:
-        return f"فعلاً هیچ خاموشی ثبت‌شده‌ای برای <b>{label}</b> نداریم."
-    lines = [f"📋 لیست فعلی خاموشی‌های <b>{label}</b> ({len(rows)} مورد):\n"]
-    for r in rows:
-        lines.append(f"📍 {r['address']}\n🕒 {r['from']} تا {r['to']} — {r['date']} ({r['type']})\n")
-    return "\n".join(lines)
+def city_search(city_key, query):
+    """Case-insensitive substring search over ONE city's already-fetched
+    state file (address field). Returns a list of matching rows."""
+    query = query.strip().lower()
+    if not query:
+        return []
+    rows = load_json(state_file_for(city_key), [])
+    return [r for r in rows if query in r["address"].lower()]
 
 
 def process_button_presses():
-    """Check for any 'نمایش شهر' button presses since last run and answer them
-    using whatever is already stored in that city's state file (no re-fetch)."""
+    """Check for any button presses (or a pending search reply) since the
+    last run, and answer them using whatever is already stored in the state
+    files (no re-fetch from the source site)."""
     offset_data = load_json(OFFSET_FILE, {"offset": 0})
     offset = offset_data["offset"]
     updates = tg_get_updates(offset)
+    pending = load_json(PENDING_FILE, {})  # {chat_id: city_key} awaiting a search keyword
 
     for update in updates:
         offset = update["update_id"] + 1
@@ -156,14 +223,48 @@ def process_button_presses():
             chat_id = str(cq["message"]["chat"]["id"])
             data = cq.get("data", "")
             tg_answer_callback(cq["id"])
-            if data.startswith("show:"):
+
+            if data.startswith("city:"):
+                key = data.split(":", 1)[1]
+                city = city_by_key(key)
+                if city:
+                    tg_send_message(chat_id, [f"برای <b>{city['label']}</b> چیکار کنم؟"],
+                                     keyboard=city_action_keyboard(key))
+
+            elif data.startswith("all:"):
                 key = data.split(":", 1)[1]
                 city = city_by_key(key)
                 if city:
                     rows = load_json(state_file_for(key), [])
-                    tg_send_message(chat_id, format_city_list(city["label"], rows))
+                    tg_send_each_row_separately(chat_id, rows, city["label"])
+
+            elif data.startswith("search:"):
+                key = data.split(":", 1)[1]
+                city = city_by_key(key)
+                if city:
+                    pending[chat_id] = key
+                    tg_send_message(chat_id, [f"🔍 کلمه‌ای که توی آدرس‌های <b>{city['label']}</b> دنبالش می‌گردی رو بفرست."])
+
+        elif "message" in update:
+            msg = update["message"]
+            chat_id = str(msg["chat"]["id"])
+            text = (msg.get("text") or "").strip()
+
+            if text and chat_id in pending:
+                key = pending.pop(chat_id)
+                city = city_by_key(key)
+                if city:
+                    matches = city_search(key, text)
+                    if not matches:
+                        tg_send_message(chat_id, [f"🔍 برای «{text}» توی <b>{city['label']}</b> چیزی پیدا نشد."])
+                    else:
+                        for r in matches:
+                            block = (f"🏙 {city['label']}\n📍 {r['address']}\n"
+                                     f"🕒 {r['from']} تا {r['to']} — {r['date']} ({r['type']})")
+                            tg_send_message(chat_id, [block])
 
     save_json(OFFSET_FILE, {"offset": offset})
+    save_json(PENDING_FILE, pending)
 
 
 # --------------------------- SITE SCRAPING --------------------------------
@@ -298,10 +399,10 @@ def main():
         print(f"[{city['label']}] total={len(rows)} new={len(new_rows)}")
         if not new_rows:
             continue
-        lines = [f"⚡️ <b>{len(new_rows)} خاموشی جدید در {city['label']}</b> ({date_from})\n"]
+        lines = [f"⚡️ <b>{len(new_rows)} خاموشی جدید در {city['label']}</b> ({date_from})"]
         for r in new_rows:
-            lines.append(f"📍 {r['address']}\n🕒 {r['from']} تا {r['to']} — {r['date']} ({r['type']})\n")
-        tg_send_message(TELEGRAM_CHAT_ID, "\n".join(lines))
+            lines.append(f"📍 {r['address']}\n🕒 {r['from']} تا {r['to']} — {r['date']} ({r['type']})")
+        tg_send_message(TELEGRAM_CHAT_ID, lines, keyboard=city_menu_keyboard())
 
 
 if __name__ == "__main__":
