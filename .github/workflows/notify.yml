@@ -25,27 +25,26 @@ jobs:
       run:
         shell: cmd
 
+    env:
+      PYTHON_EXE: C:\Users\sajjad.ka21\AppData\Local\Programs\Python\Python310\python.exe
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.10"
-          architecture: "x64"
-
       - name: Check Python
         run: |
-          where python
-          python --version
-          python -m pip --version
+          if not exist "%PYTHON_EXE%" (echo Python not found at %PYTHON_EXE% & exit /b 1)
+          "%PYTHON_EXE%" --version
+          "%PYTHON_EXE%" -m pip --version
 
       - name: Install dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements.txt
+        run: |
+          "%PYTHON_EXE%" -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: Fetch and synchronize outages
         env:
           WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
           WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
-        run: python khamooshi_notify.py
+        run: |
+          "%PYTHON_EXE%" khamooshi_notify.py
