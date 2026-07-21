@@ -32,11 +32,22 @@ export function escapeHtml(value: string): string {
 }
 
 function formatOutage(cityLabel: string, row: OutageRow): string {
+  const timeText = row.to_time
+    ? `${escapeHtml(row.from_time)} \u062A\u0627 ${escapeHtml(row.to_time)}`
+    : escapeHtml(
+        row.from_time ||
+          "\u0632\u0645\u0627\u0646 \u0646\u0627\u0645\u0634\u062E\u0635",
+      );
+
+  const dateText = row.outage_type
+    ? `${escapeHtml(row.outage_date)} (${escapeHtml(row.outage_type)})`
+    : escapeHtml(row.outage_date);
+
   return [
-    `🏙 <b>${escapeHtml(cityLabel)}</b>`,
-    `📍 ${escapeHtml(row.address)}`,
-    `🕒 ${escapeHtml(row.from_time)} تا ${escapeHtml(row.to_time)}`,
-    `📅 ${escapeHtml(row.outage_date)} (${escapeHtml(row.outage_type)})`,
+    `\u{1F3D9} <b>${escapeHtml(cityLabel)}</b>`,
+    `\u{1F4CD} ${escapeHtml(row.address)}`,
+    `\u{1F552} ${timeText}`,
+    `\u{1F4C5} ${dateText}`,
   ].join("\n");
 }
 
@@ -163,7 +174,7 @@ export async function notifyNewOutages(
   }
 
   const blocks = [
-    `⚡️ <b>${rows.length} خاموشی جدید در ${escapeHtml(cityLabel)}</b>`,
+    `âš¡ï¸ <b>${rows.length} Ø®Ø§Ù…ÙˆØ´ÛŒ Ø¬Ø¯ÛŒØ¯ Ø¯Ø± ${escapeHtml(cityLabel)}</b>`,
     ...rows.map((row) => formatOutage(cityLabel, row)),
   ];
   await sendBlocks(env, chatId, blocks);
@@ -176,7 +187,7 @@ async function handleTextMessage(
 ): Promise<void> {
   if (text === "/start" || text === BACK_BUTTON) {
     await setChatSession(env.DB, chatId, null, false);
-    await sendMessage(env, chatId, "یک شهر را انتخاب کنید:", cityMenuKeyboard());
+    await sendMessage(env, chatId, "ÛŒÚ© Ø´Ù‡Ø± Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯:", cityMenuKeyboard());
     return;
   }
 
@@ -186,7 +197,7 @@ async function handleTextMessage(
     await sendMessage(
       env,
       chatId,
-      `برای <b>${escapeHtml(selectedByLabel.label)}</b> چه کاری انجام دهم؟`,
+      `Ø¨Ø±Ø§ÛŒ <b>${escapeHtml(selectedByLabel.label)}</b> Ú†Ù‡ Ú©Ø§Ø±ÛŒ Ø§Ù†Ø¬Ø§Ù… Ø¯Ù‡Ù…ØŸ`,
       cityActionKeyboard(),
     );
     return;
@@ -200,7 +211,7 @@ async function handleTextMessage(
       await sendMessage(
         env,
         chatId,
-        "ابتدا یک شهر را انتخاب کنید.",
+        "Ø§Ø¨ØªØ¯Ø§ ÛŒÚ© Ø´Ù‡Ø± Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯.",
         cityMenuKeyboard(),
       );
       return;
@@ -211,7 +222,7 @@ async function handleTextMessage(
       await sendMessage(
         env,
         chatId,
-        `در آخرین به‌روزرسانی، خاموشی‌ای برای <b>${escapeHtml(selectedCity.label)}</b> ثبت نشده است.`,
+        `Ø¯Ø± Ø¢Ø®Ø±ÛŒÙ† Ø¨Ù‡â€ŒØ±ÙˆØ²Ø±Ø³Ø§Ù†ÛŒØŒ Ø®Ø§Ù…ÙˆØ´ÛŒâ€ŒØ§ÛŒ Ø¨Ø±Ø§ÛŒ <b>${escapeHtml(selectedCity.label)}</b> Ø«Ø¨Øª Ù†Ø´Ø¯Ù‡ Ø§Ø³Øª.`,
         cityActionKeyboard(),
       );
       return;
@@ -231,7 +242,7 @@ async function handleTextMessage(
       await sendMessage(
         env,
         chatId,
-        "ابتدا یک شهر را انتخاب کنید.",
+        "Ø§Ø¨ØªØ¯Ø§ ÛŒÚ© Ø´Ù‡Ø± Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯.",
         cityMenuKeyboard(),
       );
       return;
@@ -241,7 +252,7 @@ async function handleTextMessage(
     await sendMessage(
       env,
       chatId,
-      `عبارت موردنظر در آدرس‌های <b>${escapeHtml(selectedCity.label)}</b> را ارسال کنید.`,
+      `Ø¹Ø¨Ø§Ø±Øª Ù…ÙˆØ±Ø¯Ù†Ø¸Ø± Ø¯Ø± Ø¢Ø¯Ø±Ø³â€ŒÙ‡Ø§ÛŒ <b>${escapeHtml(selectedCity.label)}</b> Ø±Ø§ Ø§Ø±Ø³Ø§Ù„ Ú©Ù†ÛŒØ¯.`,
     );
     return;
   }
@@ -254,7 +265,7 @@ async function handleTextMessage(
       await sendMessage(
         env,
         chatId,
-        `برای «${escapeHtml(text)}» در <b>${escapeHtml(selectedCity.label)}</b> نتیجه‌ای پیدا نشد.`,
+        `Ø¨Ø±Ø§ÛŒ Â«${escapeHtml(text)}Â» Ø¯Ø± <b>${escapeHtml(selectedCity.label)}</b> Ù†ØªÛŒØ¬Ù‡â€ŒØ§ÛŒ Ù¾ÛŒØ¯Ø§ Ù†Ø´Ø¯.`,
         cityActionKeyboard(),
       );
       return;
@@ -273,7 +284,7 @@ async function handleTextMessage(
     await sendMessage(
       env,
       chatId,
-      "یکی از گزینه‌های زیر را انتخاب کنید.",
+      "ÛŒÚ©ÛŒ Ø§Ø² Ú¯Ø²ÛŒÙ†Ù‡â€ŒÙ‡Ø§ÛŒ Ø²ÛŒØ± Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯.",
       cityActionKeyboard(),
     );
     return;
@@ -282,7 +293,7 @@ async function handleTextMessage(
   await sendMessage(
     env,
     chatId,
-    "برای شروع، یک شهر را انتخاب کنید.",
+    "Ø¨Ø±Ø§ÛŒ Ø´Ø±ÙˆØ¹ØŒ ÛŒÚ© Ø´Ù‡Ø± Ø±Ø§ Ø§Ù†ØªØ®Ø§Ø¨ Ú©Ù†ÛŒØ¯.",
     cityMenuKeyboard(),
   );
 }

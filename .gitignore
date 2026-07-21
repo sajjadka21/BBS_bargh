@@ -13,3 +13,4 @@ worker/.env
 offset.json
 pending_search.json
 state_*.json
+debug_khamooshi.html

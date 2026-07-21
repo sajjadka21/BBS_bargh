@@ -1,19 +1,20 @@
-"""Shared configuration for the outage fetcher."""
+"""Configuration for the Mazandaran outage API."""
 
-BASE_URL = "https://khamooshi.maztozi.ir/"
+BASE_URL = "https://khamooshi.maztozi.ir"
+OUTAGES_API_URL = f"{BASE_URL}/api/outages"
 
-# area_id="-1" means all electricity service areas for that city.
+# The new API uses one numeric selector in the `city` request field.
 CITIES = [
     {
         "key": "babolsar",
-        "label": "بابلسر",
-        "city_id": "990090351",
-        "area_id": "85",
+        "label": "\u0628\u0627\u0628\u0644\u0633\u0631",
+        "query_city": 85,
+        "pgds": "",
     },
     {
         "key": "sari",
-        "label": "ساری",
-        "city_id": "1",
-        "area_id": "-1",
+        "label": "\u0633\u0627\u0631\u06cc",
+        "query_city": 2,
+        "pgds": "",
     },
 ]
