@@ -1,43 +1,38 @@
-name: Khamooshi Notifier
+name: Fetch outage snapshots
 
 on:
   schedule:
-    # Runs at 03:30 and 10:30 UTC = 07:00 and 14:00 Iran time (UTC+3:30)
-    - cron: "30 3,10 * * *"
-  workflow_dispatch: {}   # allows manual "Run workflow" button for testing
+    # Iran local time: 00:30
+    - cron: "30 0 * * *"
+      timezone: "Asia/Tehran"
 
-permissions:
-  contents: write   # needed so the workflow can commit the updated state.json back
+    # Iran local time: 06:00, 12:00, 18:00
+    - cron: "0 6,12,18 * * *"
+      timezone: "Asia/Tehran"
+
+  workflow_dispatch: {}
+
+concurrency:
+  group: outage-fetcher
+  cancel-in-progress: false
 
 jobs:
-  check-outages:
+  fetch-and-sync:
     runs-on: [self-hosted, Windows]
+    timeout-minutes: 15
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check Python is available
+      - name: Check Python
         run: python --version
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Run notifier
+      - name: Fetch and synchronize outages
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
+          WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
         run: python khamooshi_notify.py
-
-      - name: Commit updated state files (if changed)
-        shell: powershell
-        run: |
-          git config user.name "khamooshi-bot"
-          git config user.email "actions@github.com"
-          git add -A
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Update outage state [skip ci]"
-            git push
-          } else {
-            Write-Host "No state changes to commit."
-          }

@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bbs-bargh-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-21",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bbs-bargh-db",
+      "database_id": "9ae7a024-69f7-4d11-b436-6ccda122082d",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
