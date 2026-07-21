@@ -216,11 +216,14 @@ def post_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         "Content-Type": "application/json; charset=utf-8",
     }
 
+    sync_session = requests.Session()
+    sync_session.trust_env = False
+
     last_error: Exception | None = None
 
     for attempt in range(1, SYNC_ATTEMPTS + 1):
         try:
-            response = requests.post(
+            response = sync_session.post(
                 sync_url,
                 headers=headers,
                 json=payload,
