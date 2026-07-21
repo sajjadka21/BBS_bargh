@@ -79,12 +79,15 @@ async function normalizeRows(
       const fromTime = optionalText(row.from, 100);
       const toTime = optionalText(row.to, 100);
       const outageDate = optionalText(row.date, 100);
+      // End time is derived from the site's two-hour display rule. Keep it
+      // out of the identity key so enriching existing rows does not create a
+      // false "new outage" notification for every stored outage.
       const sourceKey = [
         cityKey,
         address,
         outageType,
         fromTime,
-        toTime,
+        "",
         outageDate,
       ].join("\u001f");
 

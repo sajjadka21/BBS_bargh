@@ -31,23 +31,175 @@ export function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
-function formatOutage(cityLabel: string, row: OutageRow): string {
-  const timeText = row.to_time
-    ? `${escapeHtml(row.from_time)} \u062A\u0627 ${escapeHtml(row.to_time)}`
-    : escapeHtml(
-        row.from_time ||
-          "\u0632\u0645\u0627\u0646 \u0646\u0627\u0645\u0634\u062E\u0635",
-      );
+const RESULTS_PER_MESSAGE = 3;
+const TEHRAN_TIME_ZONE = "Asia/Tehran";
 
-  const dateText = row.outage_type
-    ? `${escapeHtml(row.outage_date)} (${escapeHtml(row.outage_type)})`
-    : escapeHtml(row.outage_date);
+type DateParts = { year: number; month: number; day: number };
+type TehranNow = DateParts & { minutes: number };
+type OutageDisplayStatus = { label: string; emoji: string };
+
+function normalizeDigits(value: string): string {
+  return value
+    .replace(/[\u06F0-\u06F9]/g, (digit) =>
+      String(digit.charCodeAt(0) - 0x06f0),
+    )
+    .replace(/[\u0660-\u0669]/g, (digit) =>
+      String(digit.charCodeAt(0) - 0x0660),
+    );
+}
+
+function parseJalaliDate(value: string): DateParts | null {
+  const match = normalizeDigits(value.trim()).match(
+    /^(\d{3,4})\/(\d{1,2})\/(\d{1,2})$/,
+  );
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (
+    !Number.isInteger(year) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return null;
+  }
+  return { year, month, day };
+}
+
+function parseTimeMinutes(value: string): number | null {
+  const match = normalizeDigits(value.trim()).match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+  return hour * 60 + minute;
+}
+
+function getTehranNowAt(date: Date): TehranNow | null {
+  const parts = new Intl.DateTimeFormat("en-US-u-ca-persian-nu-latn", {
+    timeZone: TEHRAN_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  const year = Number(values.get("year"));
+  const month = Number(values.get("month"));
+  const day = Number(values.get("day"));
+  const hour = Number(values.get("hour"));
+  const minute = Number(values.get("minute"));
+  if (![year, month, day, hour, minute].every(Number.isFinite)) {
+    return null;
+  }
+  return { year, month, day, minutes: hour * 60 + minute };
+}
+
+function getTehranNow(): TehranNow | null {
+  return getTehranNowAt(new Date());
+}
+
+function compareDates(left: DateParts, right: DateParts): number {
+  return (
+    left.year - right.year || left.month - right.month || left.day - right.day
+  );
+}
+
+function getOutageDisplayStatus(row: OutageRow): OutageDisplayStatus {
+  const rowDate = parseJalaliDate(row.outage_date);
+  const startMinutes = parseTimeMinutes(row.from_time);
+  const endMinutes = parseTimeMinutes(row.to_time);
+  const now = getTehranNow();
+
+  if (!rowDate || startMinutes === null || !now) {
+    return { label: "\u0646\u0627\u0645\u0634\u062e\u0635", emoji: "\u26aa\ufe0f" };
+  }
+
+  const dateOrder = compareDates(rowDate, now);
+  if (dateOrder > 0 || (dateOrder === 0 && now.minutes < startMinutes)) {
+    return {
+      label: "\u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc\u200c\u0634\u062f\u0647",
+      emoji: "\u{1F535}",
+    };
+  }
+
+  if (dateOrder < 0) {
+    const previousDay = getTehranNowAt(new Date(Date.now() - 24 * 60 * 60 * 1000));
+    if (
+      previousDay &&
+      endMinutes !== null &&
+      endMinutes <= startMinutes &&
+      compareDates(rowDate, previousDay) === 0 &&
+      now.minutes < endMinutes
+    ) {
+      return { label: "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062c\u0627\u0645", emoji: "\u{1F7E0}" };
+    }
+    return { label: "\u0628\u0631\u0637\u0631\u0641\u200c\u0634\u062f\u0647", emoji: "\u{1F7E2}" };
+  }
+
+  if (endMinutes === null || endMinutes <= startMinutes) {
+    return { label: "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062c\u0627\u0645", emoji: "\u{1F7E0}" };
+  }
+
+  return now.minutes < endMinutes
+    ? { label: "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062c\u0627\u0645", emoji: "\u{1F7E0}" }
+    : { label: "\u0628\u0631\u0637\u0631\u0641\u200c\u0634\u062f\u0647", emoji: "\u{1F7E2}" };
+}
+
+function getOutageTypeDetails(value: string): {
+  typeLabel: string;
+  reason: string;
+} {
+  const [rawType = "", ...reasonParts] = value.split(" - ");
+  const normalizedType = rawType.trim();
+  const typeLabel =
+    normalizedType ===
+    "\u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc\u200c\u0634\u062f\u0647"
+      ? "\u0628\u0627 \u0628\u0631\u0646\u0627\u0645\u0647"
+      : normalizedType === "\u063a\u06cc\u0631\u0645\u0646\u062a\u0638\u0631\u0647"
+        ? "\u0628\u062f\u0648\u0646 \u0628\u0631\u0646\u0627\u0645\u0647"
+        : normalizedType || "\u0646\u0627\u0645\u0634\u062e\u0635";
+  const reason =
+    reasonParts.join(" - ").trim() ||
+    "\u0627\u0639\u0644\u0627\u0645 \u0646\u0634\u062f\u0647";
+  return { typeLabel, reason };
+}
+
+function formatOutage(
+  cityLabel: string,
+  row: OutageRow,
+  position: number,
+  total: number,
+): string {
+  const status = getOutageDisplayStatus(row);
+  const details = getOutageTypeDetails(row.outage_type);
+  const fromTime =
+    row.from_time || "\u0627\u0639\u0644\u0627\u0645 \u0646\u0634\u062f\u0647";
+  const toTime =
+    row.to_time || "\u0627\u0639\u0644\u0627\u0645 \u0646\u0634\u062f\u0647";
 
   return [
-    `\u{1F3D9} <b>${escapeHtml(cityLabel)}</b>`,
-    `\u{1F4CD} ${escapeHtml(row.address)}`,
-    `\u{1F552} ${timeText}`,
-    `\u{1F4C5} ${dateText}`,
+    `\u26a1\ufe0f <b>\u062e\u0627\u0645\u0648\u0634\u06cc ${position} \u0627\u0632 ${total}</b>`,
+    `\u{1F3D9} <b>\u0634\u0647\u0631:</b> ${escapeHtml(cityLabel)}`,
+    `\u{1F4CD} <b>\u0622\u062f\u0631\u0633:</b> ${escapeHtml(row.address)}`,
+    `\u{1F4C5} <b>\u062a\u0627\u0631\u06cc\u062e:</b> ${escapeHtml(row.outage_date)}`,
+    `\u{1F552} <b>\u0632\u0645\u0627\u0646:</b> ${escapeHtml(fromTime)} \u062a\u0627 ${escapeHtml(toTime)}`,
+    `${status.emoji} <b>\u0648\u0636\u0639\u06cc\u062a:</b> ${escapeHtml(status.label)}`,
+    `\u{1F4CC} <b>\u0646\u0648\u0639:</b> ${escapeHtml(details.typeLabel)}`,
+    `\u{1F4DD} <b>\u0639\u0644\u062a:</b> ${escapeHtml(details.reason)}`,
   ].join("\n");
 }
 
@@ -147,6 +299,34 @@ export async function sendBlocks(
   }
 }
 
+async function sendOutageResults(
+  env: Env,
+  chatId: string,
+  cityLabel: string,
+  rows: OutageRow[],
+  title: string,
+  keyboard?: ReplyKeyboardMarkup,
+): Promise<void> {
+  for (let start = 0; start < rows.length; start += RESULTS_PER_MESSAGE) {
+    const pageRows = rows.slice(start, start + RESULTS_PER_MESSAGE);
+    const end = start + pageRows.length;
+    const header = `${title}\n<b>\u0646\u062a\u0627\u06cc\u062c ${start + 1} \u062a\u0627 ${end} \u0627\u0632 ${rows.length}</b>`;
+    const blocks = pageRows.map((row, index) =>
+      formatOutage(cityLabel, row, start + index + 1, rows.length),
+    );
+    const message = [header, ...blocks].join(
+      "\n\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n",
+    );
+    const pageKeyboard = end === rows.length ? keyboard : undefined;
+
+    if (message.length <= TELEGRAM_MESSAGE_LIMIT) {
+      await sendMessage(env, chatId, message, pageKeyboard);
+    } else {
+      await sendBlocks(env, chatId, [header, ...blocks], pageKeyboard);
+    }
+  }
+}
+
 export async function setTelegramWebhook(
   env: Env,
   webhookUrl: string,
@@ -173,11 +353,13 @@ export async function notifyNewOutages(
     return;
   }
 
-  const blocks = [
-    `⚡️ <b>${rows.length} خاموشی جدید در ${escapeHtml(cityLabel)}</b>`,
-    ...rows.map((row) => formatOutage(cityLabel, row)),
-  ];
-  await sendBlocks(env, chatId, blocks);
+  await sendOutageResults(
+    env,
+    chatId,
+    cityLabel,
+    rows,
+    `\u26a1\ufe0f <b>${rows.length} \u062e\u0627\u0645\u0648\u0634\u06cc \u062c\u062f\u06cc\u062f \u062f\u0631 ${escapeHtml(cityLabel)}</b>`,
+  );
 }
 
 async function handleTextMessage(
@@ -228,10 +410,12 @@ async function handleTextMessage(
       return;
     }
 
-    await sendBlocks(
+    await sendOutageResults(
       env,
       chatId,
-      rows.map((row) => formatOutage(selectedCity.label, row)),
+      selectedCity.label,
+      rows,
+      `\u{1F4CB} <b>\u062e\u0627\u0645\u0648\u0634\u06cc\u200c\u0647\u0627\u06cc ${escapeHtml(selectedCity.label)}</b>`,
       cityActionKeyboard(),
     );
     return;
@@ -271,10 +455,12 @@ async function handleTextMessage(
       return;
     }
 
-    await sendBlocks(
+    await sendOutageResults(
       env,
       chatId,
-      matches.map((row) => formatOutage(selectedCity.label, row)),
+      selectedCity.label,
+      matches,
+      `\u{1F50E} <b>\u0646\u062a\u0627\u06cc\u062c \u062c\u0633\u062a\u062c\u0648\u06cc \u00ab${escapeHtml(text)}\u00bb</b>`,
       cityActionKeyboard(),
     );
     return;

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -26,10 +27,16 @@ IRAN_TZ = ZoneInfo("Asia/Tehran")
 FETCH_TIMEOUT_SECONDS = 30
 SYNC_TIMEOUT_SECONDS = 30
 SYNC_ATTEMPTS = 3
+OUTAGE_DURATION_MINUTES = 120
 
 ENGLISH_TO_PERSIAN_DIGITS = str.maketrans(
     "0123456789",
     "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9",
+)
+TIME_DIGITS_TO_ENGLISH = str.maketrans(
+    "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9"
+    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    "01234567890123456789",
 )
 
 PLANNED_TEXT = (
@@ -66,6 +73,45 @@ def clean_text(value: object) -> str:
     return " ".join(str(value).split())
 
 
+def derive_time_range(value: object) -> tuple[str, str]:
+    """Return the site's displayed two-hour start/end range."""
+    text = clean_text(value).translate(TIME_DIGITS_TO_ENGLISH)
+    if not text:
+        return "", ""
+
+    range_match = re.fullmatch(
+        r"(\d{1,2}):(\d{2})\s*(?:-|\u2013|\u2014|\u062a\u0627)\s*(\d{1,2}):(\d{2})",
+        text,
+    )
+    if range_match:
+        start_hour, start_minute, end_hour, end_minute = map(int, range_match.groups())
+        if (
+            0 <= start_hour <= 23
+            and 0 <= start_minute <= 59
+            and 0 <= end_hour <= 23
+            and 0 <= end_minute <= 59
+        ):
+            return (
+                f"{start_hour:02d}:{start_minute:02d}",
+                f"{end_hour:02d}:{end_minute:02d}",
+            )
+
+    start_match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not start_match:
+        return text, ""
+
+    start_hour, start_minute = map(int, start_match.groups())
+    if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59):
+        return text, ""
+
+    start_total = start_hour * 60 + start_minute
+    end_total = (start_total + OUTAGE_DURATION_MINUTES) % (24 * 60)
+    return (
+        f"{start_hour:02d}:{start_minute:02d}",
+        f"{end_total // 60:02d}:{end_total % 60:02d}",
+    )
+
+
 def persian_api_date(iran_now: datetime) -> tuple[str, str]:
     """Return (ASCII Jalali date, Persian-digit Jalali date)."""
     jalali = jdatetime.date.fromgregorian(date=iran_now.date())
@@ -92,13 +138,13 @@ def normalize_api_row(raw_row: object) -> dict[str, str] | None:
 
     reason = clean_text(raw_row.get("reason_outage"))
     outage_type = f"{status_text} - {reason}" if reason else status_text
+    from_time, to_time = derive_time_range(raw_row.get("outage_time"))
 
     return {
         "address": address,
         "type": outage_type,
-        "from": clean_text(raw_row.get("outage_time")),
-        # The new API currently provides no outage end time.
-        "to": "",
+        "from": from_time,
+        "to": to_time,
         "date": clean_text(raw_row.get("outage_date")),
     }
 
