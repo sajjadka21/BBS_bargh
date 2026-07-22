@@ -1,7 +1,9 @@
+import { normalizePersianText } from "./persian";
 import type {
   ChatSession,
   D1Database,
   NormalizedOutage,
+  NotificationBatch,
   OutageRow,
 } from "./types";
 
@@ -10,6 +12,14 @@ interface CitySyncStatus {
   fetched_at: string;
   row_count: number;
   updated_at: string;
+}
+
+interface NotificationBatchRecord {
+  id: string;
+  chat_id: string;
+  city_key: string;
+  rows_json: string;
+  created_at: string;
 }
 
 export async function claimUpdate(
@@ -89,6 +99,20 @@ export async function listCityOutages(
   return result.results;
 }
 
+export async function listCityOutagesForIdentity(
+  db: D1Database,
+  cityKey: string,
+): Promise<OutageRow[]> {
+  const result = await db
+    .prepare(
+      "SELECT city_key, outage_key, address, outage_type, from_time, " +
+        "to_time, outage_date, fetched_at FROM outages WHERE city_key = ?",
+    )
+    .bind(cityKey)
+    .all<OutageRow>();
+  return result.results;
+}
+
 function escapeLike(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
@@ -98,7 +122,12 @@ export async function searchCityOutages(
   cityKey: string,
   query: string,
 ): Promise<OutageRow[]> {
-  const pattern = `%${escapeLike(query.trim())}%`;
+  const normalizedQuery = normalizePersianText(query);
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const pattern = `%${escapeLike(normalizedQuery)}%`;
   const result = await db
     .prepare(
       "SELECT city_key, outage_key, address, outage_type, from_time, " +
@@ -122,17 +151,6 @@ export async function getCitySyncStatus(
     )
     .bind(cityKey)
     .first<CitySyncStatus>();
-}
-
-export async function getExistingOutageKeys(
-  db: D1Database,
-  cityKey: string,
-): Promise<Set<string>> {
-  const result = await db
-    .prepare("SELECT outage_key FROM outages WHERE city_key = ?")
-    .bind(cityKey)
-    .all<{ outage_key: string }>();
-  return new Set(result.results.map((row) => row.outage_key));
 }
 
 export async function replaceCitySnapshot(
@@ -175,9 +193,74 @@ export async function replaceCitySnapshot(
       "DELETE FROM processed_updates " +
         "WHERE processed_at < datetime('now', '-30 days')",
     ),
+    db.prepare(
+      "DELETE FROM notification_batches " +
+        "WHERE julianday(created_at) < julianday('now', '-14 days')",
+    ),
   ];
 
   await db.batch(statements);
+}
+
+export async function createNotificationBatch(
+  db: D1Database,
+  chatId: string,
+  cityKey: string,
+  rows: OutageRow[],
+): Promise<string> {
+  const id = crypto.randomUUID().replaceAll("-", "");
+  const createdAt = new Date().toISOString();
+
+  await db.batch([
+    db
+      .prepare(
+        "INSERT INTO notification_batches " +
+          "(id, chat_id, city_key, rows_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .bind(id, chatId, cityKey, JSON.stringify(rows), createdAt),
+    db.prepare(
+      "DELETE FROM notification_batches " +
+        "WHERE julianday(created_at) < julianday('now', '-14 days')",
+    ),
+  ]);
+
+  return id;
+}
+
+export async function getNotificationBatch(
+  db: D1Database,
+  id: string,
+): Promise<NotificationBatch | null> {
+  const record = await db
+    .prepare(
+      "SELECT id, chat_id, city_key, rows_json, created_at " +
+        "FROM notification_batches WHERE id = ?",
+    )
+    .bind(id)
+    .first<NotificationBatchRecord>();
+
+  if (!record) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(record.rows_json);
+  } catch {
+    return null;
+  }
+
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
+
+  return {
+    id: record.id,
+    chatId: record.chat_id,
+    cityKey: record.city_key,
+    rows: parsed as OutageRow[],
+    createdAt: record.created_at,
+  };
 }
 
 export async function listSyncStatuses(

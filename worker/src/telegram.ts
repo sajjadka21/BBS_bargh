@@ -9,20 +9,33 @@ import {
 } from "./config";
 import {
   claimUpdate,
+  createNotificationBatch,
   getChatSession,
+  getNotificationBatch,
   listCityOutages,
   releaseUpdate,
   searchCityOutages,
   setChatSession,
 } from "./database";
+import { normalizePersianText, toPersianDigits } from "./persian";
 import type {
   Env,
+  InlineKeyboardMarkup,
   OutageRow,
   ReplyKeyboardMarkup,
+  TelegramCallbackQuery,
+  TelegramReplyMarkup,
   TelegramUpdate,
 } from "./types";
 
 const TELEGRAM_MESSAGE_LIMIT = 3500;
+const RESULTS_PER_MESSAGE = 3;
+const TEHRAN_TIME_ZONE = "Asia/Tehran";
+const SHOW_NEW_OUTAGES_PREFIX = "show_new:";
+
+type DateParts = { year: number; month: number; day: number };
+type TehranNow = DateParts & { minutes: number };
+type OutageDisplayStatus = { label: string; emoji: string };
 
 export function escapeHtml(value: string): string {
   return value
@@ -30,13 +43,6 @@ export function escapeHtml(value: string): string {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }
-
-const RESULTS_PER_MESSAGE = 3;
-const TEHRAN_TIME_ZONE = "Asia/Tehran";
-
-type DateParts = { year: number; month: number; day: number };
-type TehranNow = DateParts & { minutes: number };
-type OutageDisplayStatus = { label: string; emoji: string };
 
 function normalizeDigits(value: string): string {
   return value
@@ -125,15 +131,12 @@ function getOutageDisplayStatus(row: OutageRow): OutageDisplayStatus {
   const now = getTehranNow();
 
   if (!rowDate || startMinutes === null || !now) {
-    return { label: "\u0646\u0627\u0645\u0634\u062e\u0635", emoji: "\u26aa\ufe0f" };
+    return { label: "نامشخص", emoji: "⚪️" };
   }
 
   const dateOrder = compareDates(rowDate, now);
   if (dateOrder > 0 || (dateOrder === 0 && now.minutes < startMinutes)) {
-    return {
-      label: "\u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc\u200c\u0634\u062f\u0647",
-      emoji: "\u{1F535}",
-    };
+    return { label: "برنامه‌ریزی‌شده", emoji: "🔵" };
   }
 
   if (dateOrder < 0) {
@@ -145,18 +148,18 @@ function getOutageDisplayStatus(row: OutageRow): OutageDisplayStatus {
       compareDates(rowDate, previousDay) === 0 &&
       now.minutes < endMinutes
     ) {
-      return { label: "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062c\u0627\u0645", emoji: "\u{1F7E0}" };
+      return { label: "در حال انجام", emoji: "🟠" };
     }
-    return { label: "\u0628\u0631\u0637\u0631\u0641\u200c\u0634\u062f\u0647", emoji: "\u{1F7E2}" };
+    return { label: "برطرف‌شده", emoji: "🟢" };
   }
 
   if (endMinutes === null || endMinutes <= startMinutes) {
-    return { label: "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062c\u0627\u0645", emoji: "\u{1F7E0}" };
+    return { label: "در حال انجام", emoji: "🟠" };
   }
 
   return now.minutes < endMinutes
-    ? { label: "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062c\u0627\u0645", emoji: "\u{1F7E0}" }
-    : { label: "\u0628\u0631\u0637\u0631\u0641\u200c\u0634\u062f\u0647", emoji: "\u{1F7E2}" };
+    ? { label: "در حال انجام", emoji: "🟠" }
+    : { label: "برطرف‌شده", emoji: "🟢" };
 }
 
 function getOutageTypeDetails(value: string): {
@@ -166,15 +169,12 @@ function getOutageTypeDetails(value: string): {
   const [rawType = "", ...reasonParts] = value.split(" - ");
   const normalizedType = rawType.trim();
   const typeLabel =
-    normalizedType ===
-    "\u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc\u200c\u0634\u062f\u0647"
-      ? "\u0628\u0627 \u0628\u0631\u0646\u0627\u0645\u0647"
-      : normalizedType === "\u063a\u06cc\u0631\u0645\u0646\u062a\u0638\u0631\u0647"
-        ? "\u0628\u062f\u0648\u0646 \u0628\u0631\u0646\u0627\u0645\u0647"
-        : normalizedType || "\u0646\u0627\u0645\u0634\u062e\u0635";
-  const reason =
-    reasonParts.join(" - ").trim() ||
-    "\u0627\u0639\u0644\u0627\u0645 \u0646\u0634\u062f\u0647";
+    normalizedType === "برنامه‌ریزی‌شده"
+      ? "با برنامه"
+      : normalizedType === "غیرمنتظره"
+        ? "بدون برنامه"
+        : normalizedType || "نامشخص";
+  const reason = reasonParts.join(" - ").trim() || "اعلام نشده";
   return { typeLabel, reason };
 }
 
@@ -186,20 +186,18 @@ function formatOutage(
 ): string {
   const status = getOutageDisplayStatus(row);
   const details = getOutageTypeDetails(row.outage_type);
-  const fromTime =
-    row.from_time || "\u0627\u0639\u0644\u0627\u0645 \u0646\u0634\u062f\u0647";
-  const toTime =
-    row.to_time || "\u0627\u0639\u0644\u0627\u0645 \u0646\u0634\u062f\u0647";
+  const fromTime = row.from_time || "اعلام نشده";
+  const toTime = row.to_time || "اعلام نشده";
 
   return [
-    `\u26a1\ufe0f <b>\u062e\u0627\u0645\u0648\u0634\u06cc ${position} \u0627\u0632 ${total}</b>`,
-    `\u{1F3D9} <b>\u0634\u0647\u0631:</b> ${escapeHtml(cityLabel)}`,
-    `\u{1F4CD} <b>\u0622\u062f\u0631\u0633:</b> ${escapeHtml(row.address)}`,
-    `\u{1F4C5} <b>\u062a\u0627\u0631\u06cc\u062e:</b> ${escapeHtml(row.outage_date)}`,
-    `\u{1F552} <b>\u0632\u0645\u0627\u0646:</b> ${escapeHtml(fromTime)} \u062a\u0627 ${escapeHtml(toTime)}`,
-    `${status.emoji} <b>\u0648\u0636\u0639\u06cc\u062a:</b> ${escapeHtml(status.label)}`,
-    `\u{1F4CC} <b>\u0646\u0648\u0639:</b> ${escapeHtml(details.typeLabel)}`,
-    `\u{1F4DD} <b>\u0639\u0644\u062a:</b> ${escapeHtml(details.reason)}`,
+    `⚡️ <b>خاموشی ${toPersianDigits(position)} از ${toPersianDigits(total)}</b>`,
+    `🏙 <b>شهر:</b> ${escapeHtml(cityLabel)}`,
+    `📍 <b>آدرس:</b> ${escapeHtml(row.address)}`,
+    `📅 <b>تاریخ:</b> ${escapeHtml(row.outage_date)}`,
+    `🕒 <b>زمان:</b> ${escapeHtml(fromTime)} تا ${escapeHtml(toTime)}`,
+    `${status.emoji} <b>وضعیت:</b> ${escapeHtml(status.label)}`,
+    `📌 <b>نوع:</b> ${escapeHtml(details.typeLabel)}`,
+    `📝 <b>علت:</b> ${escapeHtml(details.reason)}`,
   ].join("\n");
 }
 
@@ -267,7 +265,7 @@ export async function sendMessage(
   env: Env,
   chatId: string,
   text: string,
-  keyboard?: ReplyKeyboardMarkup,
+  keyboard?: TelegramReplyMarkup,
 ): Promise<void> {
   await callTelegram(env, "sendMessage", {
     chat_id: chatId,
@@ -310,12 +308,12 @@ async function sendOutageResults(
   for (let start = 0; start < rows.length; start += RESULTS_PER_MESSAGE) {
     const pageRows = rows.slice(start, start + RESULTS_PER_MESSAGE);
     const end = start + pageRows.length;
-    const header = `${title}\n<b>\u0646\u062a\u0627\u06cc\u062c ${start + 1} \u062a\u0627 ${end} \u0627\u0632 ${rows.length}</b>`;
+    const header = `${title}\n<b>نتایج ${toPersianDigits(start + 1)} تا ${toPersianDigits(end)} از ${toPersianDigits(rows.length)}</b>`;
     const blocks = pageRows.map((row, index) =>
       formatOutage(cityLabel, row, start + index + 1, rows.length),
     );
     const message = [header, ...blocks].join(
-      "\n\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n",
+      "\n\n━━━━━━━━━━━━\n\n",
     );
     const pageKeyboard = end === rows.length ? keyboard : undefined;
 
@@ -327,6 +325,19 @@ async function sendOutageResults(
   }
 }
 
+async function answerCallbackQuery(
+  env: Env,
+  callbackQueryId: string,
+  text?: string,
+  showAlert = false,
+): Promise<void> {
+  await callTelegram(env, "answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    ...(text ? { text } : {}),
+    show_alert: showAlert,
+  });
+}
+
 export async function setTelegramWebhook(
   env: Env,
   webhookUrl: string,
@@ -334,7 +345,7 @@ export async function setTelegramWebhook(
   return callTelegram(env, "setWebhook", {
     url: webhookUrl,
     secret_token: env.TELEGRAM_WEBHOOK_SECRET,
-    allowed_updates: ["message"],
+    allowed_updates: ["message", "callback_query"],
     drop_pending_updates: true,
   });
 }
@@ -345,6 +356,7 @@ export async function getTelegramWebhookInfo(env: Env): Promise<unknown> {
 
 export async function notifyNewOutages(
   env: Env,
+  cityKey: string,
   cityLabel: string,
   rows: OutageRow[],
 ): Promise<void> {
@@ -353,12 +365,87 @@ export async function notifyNewOutages(
     return;
   }
 
+  const batchId = await createNotificationBatch(env.DB, chatId, cityKey, rows);
+  const keyboard: InlineKeyboardMarkup = {
+    inline_keyboard: [
+      [
+        {
+          text: "نمایش",
+          callback_data: `${SHOW_NEW_OUTAGES_PREFIX}${batchId}`,
+        },
+      ],
+    ],
+  };
+
+  const countText =
+    rows.length === 1
+      ? "یک خاموشی جدید ثبت شد."
+      : `${toPersianDigits(rows.length)} خاموشی جدید ثبت شد.`;
+
+  await sendMessage(
+    env,
+    chatId,
+    [
+      `⚡️ <b>خاموشی جدید در ${escapeHtml(cityLabel)}</b>`,
+      "",
+      countText,
+      "برای مشاهده جزئیات، دکمه زیر را بزنید.",
+    ].join("\n"),
+    keyboard,
+  );
+}
+
+async function handleCallbackQuery(
+  env: Env,
+  callbackQuery: TelegramCallbackQuery,
+): Promise<void> {
+  const data = callbackQuery.data?.trim() ?? "";
+  const chatId = callbackQuery.message
+    ? String(callbackQuery.message.chat.id)
+    : null;
+
+  if (!data.startsWith(SHOW_NEW_OUTAGES_PREFIX) || !chatId) {
+    await answerCallbackQuery(
+      env,
+      callbackQuery.id,
+      "این دکمه قابل استفاده نیست.",
+      true,
+    );
+    return;
+  }
+
+  const batchId = data.slice(SHOW_NEW_OUTAGES_PREFIX.length);
+  const batch = await getNotificationBatch(env.DB, batchId);
+  if (!batch || batch.chatId !== chatId) {
+    await answerCallbackQuery(
+      env,
+      callbackQuery.id,
+      "جزئیات این اعلان دیگر در دسترس نیست.",
+      true,
+    );
+    return;
+  }
+
+  const city = cityByKey(batch.cityKey);
+  if (!city || batch.rows.length === 0) {
+    await answerCallbackQuery(
+      env,
+      callbackQuery.id,
+      "اطلاعات این اعلان کامل نیست.",
+      true,
+    );
+    return;
+  }
+
+  await answerCallbackQuery(env, callbackQuery.id, "در حال نمایش جزئیات…");
+  await setChatSession(env.DB, chatId, city.key, false);
   await sendOutageResults(
     env,
     chatId,
-    cityLabel,
-    rows,
-    `\u26a1\ufe0f <b>${rows.length} \u062e\u0627\u0645\u0648\u0634\u06cc \u062c\u062f\u06cc\u062f \u062f\u0631 ${escapeHtml(cityLabel)}</b>`,
+    city.label,
+    batch.rows,
+    `⚡️ <b>خاموشی‌های جدید ${escapeHtml(city.label)}</b>`,
+    cityActionKeyboard(),
   );
 }
 
@@ -415,7 +502,7 @@ async function handleTextMessage(
       chatId,
       selectedCity.label,
       rows,
-      `\u{1F4CB} <b>\u062e\u0627\u0645\u0648\u0634\u06cc\u200c\u0647\u0627\u06cc ${escapeHtml(selectedCity.label)}</b>`,
+      `📋 <b>خاموشی‌های ${escapeHtml(selectedCity.label)}</b>`,
       cityActionKeyboard(),
     );
     return;
@@ -443,13 +530,18 @@ async function handleTextMessage(
 
   if (session?.awaiting_search === 1 && selectedCity) {
     await setChatSession(env.DB, chatId, selectedCity.key, false);
-    const matches = await searchCityOutages(env.DB, selectedCity.key, text);
+    const normalizedSearch = normalizePersianText(text);
+    const matches = await searchCityOutages(
+      env.DB,
+      selectedCity.key,
+      normalizedSearch,
+    );
 
     if (matches.length === 0) {
       await sendMessage(
         env,
         chatId,
-        `برای «${escapeHtml(text)}» در <b>${escapeHtml(selectedCity.label)}</b> نتیجه‌ای پیدا نشد.`,
+        `برای «${escapeHtml(normalizedSearch)}» در <b>${escapeHtml(selectedCity.label)}</b> نتیجه‌ای پیدا نشد.`,
         cityActionKeyboard(),
       );
       return;
@@ -460,7 +552,7 @@ async function handleTextMessage(
       chatId,
       selectedCity.label,
       matches,
-      `\u{1F50E} <b>\u0646\u062a\u0627\u06cc\u062c \u062c\u0633\u062a\u062c\u0648\u06cc \u00ab${escapeHtml(text)}\u00bb</b>`,
+      `🔎 <b>نتایج جستجوی «${escapeHtml(normalizedSearch)}»</b>`,
       cityActionKeyboard(),
     );
     return;
@@ -498,6 +590,11 @@ export async function handleTelegramUpdate(
   }
 
   try {
+    if (update.callback_query) {
+      await handleCallbackQuery(env, update.callback_query);
+      return;
+    }
+
     const message = update.message;
     if (!message) {
       return;

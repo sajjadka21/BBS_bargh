@@ -66,6 +66,14 @@ export interface OutageRow {
   fetched_at: string;
 }
 
+export interface NotificationBatch {
+  id: string;
+  chatId: string;
+  cityKey: string;
+  rows: OutageRow[];
+  createdAt: string;
+}
+
 export interface ChatSession {
   chat_id: string;
   selected_city: string | null;
@@ -76,6 +84,7 @@ export interface ChatSession {
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }
 
 export interface TelegramMessage {
@@ -86,9 +95,26 @@ export interface TelegramMessage {
   text?: string;
 }
 
+export interface TelegramCallbackQuery {
+  id: string;
+  message?: TelegramMessage;
+  data?: string;
+}
+
 export interface ReplyKeyboardMarkup {
   keyboard: Array<Array<{ text: string }>>;
   resize_keyboard: boolean;
   is_persistent: boolean;
   input_field_placeholder?: string;
 }
+
+export interface InlineKeyboardMarkup {
+  inline_keyboard: Array<
+    Array<{
+      text: string;
+      callback_data: string;
+    }>
+  >;
+}
+
+export type TelegramReplyMarkup = ReplyKeyboardMarkup | InlineKeyboardMarkup;

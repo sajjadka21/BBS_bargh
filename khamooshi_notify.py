@@ -31,20 +31,44 @@ OUTAGE_DURATION_MINUTES = 120
 
 ENGLISH_TO_PERSIAN_DIGITS = str.maketrans(
     "0123456789",
-    "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9",
+    "۰۱۲۳۴۵۶۷۸۹",
 )
 TIME_DIGITS_TO_ENGLISH = str.maketrans(
-    "\u06F0\u06F1\u06F2\u06F3\u06F4\u06F5\u06F6\u06F7\u06F8\u06F9"
-    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    "۰۱۲۳۴۵۶۷۸۹"
+    "٠١٢٣٤٥٦٧٨٩",
     "01234567890123456789",
 )
-
-PLANNED_TEXT = (
-    "\u0628\u0631\u0646\u0627\u0645\u0647\u200c"
-    "\u0631\u06cc\u0632\u06cc\u200c\u0634\u062f\u0647"
+PERSIAN_TEXT_TRANSLATION = str.maketrans(
+    {
+        "ي": "ی",
+        "ى": "ی",
+        "ك": "ک",
+        "٠": "۰",
+        "١": "۱",
+        "٢": "۲",
+        "٣": "۳",
+        "٤": "۴",
+        "٥": "۵",
+        "٦": "۶",
+        "٧": "۷",
+        "٨": "۸",
+        "٩": "۹",
+        "0": "۰",
+        "1": "۱",
+        "2": "۲",
+        "3": "۳",
+        "4": "۴",
+        "5": "۵",
+        "6": "۶",
+        "7": "۷",
+        "8": "۸",
+        "9": "۹",
+    }
 )
-UNPLANNED_TEXT = "\u063a\u06cc\u0631\u0645\u0646\u062a\u0638\u0631\u0647"
-UNKNOWN_TEXT = "\u0646\u0627\u0645\u0634\u062e\u0635"
+
+PLANNED_TEXT = "برنامه‌ریزی‌شده"
+UNPLANNED_TEXT = "غیرمنتظره"
+UNKNOWN_TEXT = "نامشخص"
 
 API_HEADERS = {
     "Accept": "*/*",
@@ -67,10 +91,11 @@ def required_env(name: str) -> str:
 
 
 def clean_text(value: object) -> str:
-    """Normalize whitespace, including CR/LF returned inside addresses."""
+    """Normalize Persian characters, digits, and whitespace before storage."""
     if value is None:
         return ""
-    return " ".join(str(value).split())
+    text = str(value).translate(PERSIAN_TEXT_TRANSLATION)
+    return " ".join(text.split())
 
 
 def derive_time_range(value: object) -> tuple[str, str]:
@@ -80,7 +105,7 @@ def derive_time_range(value: object) -> tuple[str, str]:
         return "", ""
 
     range_match = re.fullmatch(
-        r"(\d{1,2}):(\d{2})\s*(?:-|\u2013|\u2014|\u062a\u0627)\s*(\d{1,2}):(\d{2})",
+        r"(\d{1,2}):(\d{2})\s*(?:-|–|—|تا)\s*(\d{1,2}):(\d{2})",
         text,
     )
     if range_match:
@@ -137,14 +162,14 @@ def normalize_api_row(raw_row: object) -> dict[str, str] | None:
         status_text = UNKNOWN_TEXT
 
     reason = clean_text(raw_row.get("reason_outage"))
-    outage_type = f"{status_text} - {reason}" if reason else status_text
+    outage_type = clean_text(f"{status_text} - {reason}" if reason else status_text)
     from_time, to_time = derive_time_range(raw_row.get("outage_time"))
 
     return {
         "address": address,
         "type": outage_type,
-        "from": from_time,
-        "to": to_time,
+        "from": clean_text(from_time),
+        "to": clean_text(to_time),
         "date": clean_text(raw_row.get("outage_date")),
     }
 

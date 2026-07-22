@@ -1,9 +1,10 @@
 import { cityByKey } from "./config";
 import {
   getCitySyncStatus,
-  getExistingOutageKeys,
+  listCityOutagesForIdentity,
   replaceCitySnapshot,
 } from "./database";
+import { normalizePersianText } from "./persian";
 import { notifyNewOutages } from "./telegram";
 import type {
   Env,
@@ -26,7 +27,7 @@ function requireText(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== "string") {
     throw new Error(`${field} must be a string.`);
   }
-  const normalized = value.trim();
+  const normalized = normalizePersianText(value);
   if (!normalized) {
     throw new Error(`${field} cannot be empty.`);
   }
@@ -43,7 +44,7 @@ function optionalText(value: unknown, maxLength: number): string {
   if (typeof value !== "string") {
     throw new Error("Outage fields must be strings.");
   }
-  return value.trim().slice(0, maxLength);
+  return normalizePersianText(value).slice(0, maxLength);
 }
 
 async function sha256(value: string): Promise<string> {
@@ -54,6 +55,18 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+async function outageIdentityKey(
+  cityKey: string,
+  address: string,
+  outageType: string,
+  fromTime: string,
+  outageDate: string,
+): Promise<string> {
+  return sha256(
+    [cityKey, address, outageType, fromTime, "", outageDate].join("\u001f"),
+  );
 }
 
 async function normalizeRows(
@@ -79,21 +92,16 @@ async function normalizeRows(
       const fromTime = optionalText(row.from, 100);
       const toTime = optionalText(row.to, 100);
       const outageDate = optionalText(row.date, 100);
-      // End time is derived from the site's two-hour display rule. Keep it
-      // out of the identity key so enriching existing rows does not create a
-      // false "new outage" notification for every stored outage.
-      const sourceKey = [
-        cityKey,
-        address,
-        outageType,
-        fromTime,
-        "",
-        outageDate,
-      ].join("\u001f");
 
       return {
         cityKey,
-        outageKey: await sha256(sourceKey),
+        outageKey: await outageIdentityKey(
+          cityKey,
+          address,
+          outageType,
+          fromTime,
+          outageDate,
+        ),
         address,
         outageType,
         fromTime,
@@ -106,6 +114,24 @@ async function normalizeRows(
 
   // Prevent duplicate source rows from violating the composite primary key.
   return [...new Map(normalized.map((row) => [row.outageKey, row])).values()];
+}
+
+async function existingNormalizedKeys(
+  cityKey: string,
+  rows: OutageRow[],
+): Promise<Set<string>> {
+  const keys = await Promise.all(
+    rows.map((row) =>
+      outageIdentityKey(
+        cityKey,
+        normalizePersianText(row.address),
+        normalizePersianText(row.outage_type),
+        normalizePersianText(row.from_time),
+        normalizePersianText(row.outage_date),
+      ),
+    ),
+  );
+  return new Set(keys);
 }
 
 function toDatabaseRow(row: NormalizedOutage): OutageRow {
@@ -130,7 +156,16 @@ export async function synchronizeSnapshots(
   }
 
   const payload = rawPayload as SyncPayload;
-  const fetchedAt = requireText(payload.fetched_at, "fetched_at", 100);
+  if (typeof payload.fetched_at !== "string") {
+    throw new Error("fetched_at must be a string.");
+  }
+  const fetchedAt = payload.fetched_at.trim();
+  if (!fetchedAt) {
+    throw new Error("fetched_at cannot be empty.");
+  }
+  if (fetchedAt.length > 100) {
+    throw new Error("fetched_at is too long.");
+  }
   if (Number.isNaN(Date.parse(fetchedAt))) {
     throw new Error("fetched_at must be a valid ISO date-time.");
   }
@@ -154,7 +189,8 @@ export async function synchronizeSnapshots(
 
     const rows = await normalizeRows(cityKey, cityInput.rows, fetchedAt);
     const previousStatus = await getCitySyncStatus(env.DB, cityKey);
-    const existingKeys = await getExistingOutageKeys(env.DB, cityKey);
+    const previousRows = await listCityOutagesForIdentity(env.DB, cityKey);
+    const existingKeys = await existingNormalizedKeys(cityKey, previousRows);
     const newRows = rows.filter((row) => !existingKeys.has(row.outageKey));
 
     await replaceCitySnapshot(env.DB, cityKey, rows, fetchedAt);
@@ -164,6 +200,7 @@ export async function synchronizeSnapshots(
       try {
         await notifyNewOutages(
           env,
+          city.key,
           city.label,
           newRows.map(toDatabaseRow),
         );
