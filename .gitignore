@@ -14,3 +14,13 @@ offset.json
 pending_search.json
 state_*.json
 debug_khamooshi.html
+
+# Temporary Tehran/browser experiments
+.tehran_*/
+test_tehran_*.py
+tehran-province-result.json
+tehran_geocode_attempts_*.json
+tehran_session_*.json
+tehran_test_debug_page.html
+bbs-bargh-cloudflare-browser-*/
+bbs-bargh-cloudflare-browser-*.zip
