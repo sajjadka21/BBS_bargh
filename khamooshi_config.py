@@ -3,18 +3,31 @@
 BASE_URL = "https://khamooshi.maztozi.ir"
 OUTAGES_API_URL = f"{BASE_URL}/api/outages"
 
-# The new API uses one numeric selector in the `city` request field.
+# One logical city can be backed by several numeric selectors in the API.
+# The website sends one /api/outages request for every selector and merges them.
 CITIES = [
     {
+        "key": "babol",
+        "label": "بابل",
+        "source_city_ids": [13, 25, 61, 62, 64, 65, 66, 67, 68],
+        "pgds": "",
+    },
+    {
         "key": "babolsar",
-        "label": "\u0628\u0627\u0628\u0644\u0633\u0631",
-        "query_city": 85,
+        "label": "بابلسر",
+        "source_city_ids": [53, 85],
         "pgds": "",
     },
     {
         "key": "sari",
-        "label": "\u0633\u0627\u0631\u06cc",
-        "query_city": 2,
+        "label": "ساری",
+        "source_city_ids": [2, 3, 4, 5, 6, 87],
+        "pgds": "",
+    },
+    {
+        "key": "qaemshahr",
+        "label": "قائم‌شهر",
+        "source_city_ids": [31, 32, 34],
         "pgds": "",
     },
 ]

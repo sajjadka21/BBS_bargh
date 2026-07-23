@@ -1,4 +1,8 @@
-import { listSyncStatuses } from "./database";
+import {
+  getOutageNumberAnalysis,
+  listSyncStatuses,
+} from "./database";
+import { cityByKey } from "./config";
 import {
   getTelegramWebhookInfo,
   handleTelegramUpdate,
@@ -31,6 +35,17 @@ async function parseJson(request: Request): Promise<unknown> {
     throw new Error("Content-Type must be application/json.");
   }
   return request.json();
+}
+
+function parseAnalysisLimit(value: string | null): number {
+  if (!value) {
+    return 200;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error("limit must be a positive integer.");
+  }
+  return Math.min(parsed, 500);
 }
 
 async function route(request: Request, env: Env): Promise<Response> {
@@ -81,6 +96,25 @@ async function route(request: Request, env: Env): Promise<Response> {
       return unauthorized();
     }
     return jsonResponse({ ok: true, result: await getTelegramWebhookInfo(env) });
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/admin/outage-number-analysis"
+  ) {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) {
+      return unauthorized();
+    }
+    const cityKey = (url.searchParams.get("city") ?? "").trim();
+    if (cityKey && !cityByKey(cityKey)) {
+      return jsonResponse(
+        { ok: false, error: `Unsupported city: ${cityKey}` },
+        400,
+      );
+    }
+    const limit = parseAnalysisLimit(url.searchParams.get("limit"));
+    const analysis = await getOutageNumberAnalysis(env.DB, cityKey, limit);
+    return jsonResponse({ ok: true, ...analysis });
   }
 
   return jsonResponse({ ok: false, error: "Not found" }, 404);

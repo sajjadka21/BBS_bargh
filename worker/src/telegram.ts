@@ -1,11 +1,14 @@
 import {
-  BACK_BUTTON,
+  CHANGE_CITY_BUTTON,
+  MAIN_MENU_BUTTON,
+  MAZANDARAN_BUTTON,
   SEARCH_BUTTON,
   SHOW_ALL_BUTTON,
   cityActionKeyboard,
   cityByKey,
   cityByLabel,
   cityMenuKeyboard,
+  mainMenuKeyboard,
 } from "./config";
 import {
   claimUpdate,
@@ -140,7 +143,9 @@ function getOutageDisplayStatus(row: OutageRow): OutageDisplayStatus {
   }
 
   if (dateOrder < 0) {
-    const previousDay = getTehranNowAt(new Date(Date.now() - 24 * 60 * 60 * 1000));
+    const previousDay = getTehranNowAt(
+      new Date(Date.now() - 24 * 60 * 60 * 1000),
+    );
     if (
       previousDay &&
       endMinutes !== null &&
@@ -178,6 +183,27 @@ function getOutageTypeDetails(value: string): {
   return { typeLabel, reason };
 }
 
+function parseStoredStringArray(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value || "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return [
+      ...new Set(
+        parsed
+          .filter((item): item is string | number =>
+            typeof item === "string" || typeof item === "number",
+          )
+          .map((item) => String(item).trim())
+          .filter(Boolean),
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
 function formatOutage(
   cityLabel: string,
   row: OutageRow,
@@ -188,12 +214,18 @@ function formatOutage(
   const details = getOutageTypeDetails(row.outage_type);
   const fromTime = row.from_time || "اعلام نشده";
   const toTime = row.to_time || "اعلام نشده";
+  const outageNumbers = parseStoredStringArray(row.outage_numbers);
+  const outageNumberText =
+    outageNumbers.length > 0
+      ? outageNumbers.map((value) => toPersianDigits(value)).join("، ")
+      : "اعلام نشده";
 
   return [
     `⚡️ <b>خاموشی ${toPersianDigits(position)} از ${toPersianDigits(total)}</b>`,
     `🏙 <b>شهر:</b> ${escapeHtml(cityLabel)}`,
     `📍 <b>آدرس:</b> ${escapeHtml(row.address)}`,
     `📅 <b>تاریخ:</b> ${escapeHtml(row.outage_date)}`,
+    `🔢 <b>شماره خاموشی:</b> ${escapeHtml(outageNumberText)}`,
     `🕒 <b>زمان:</b> ${escapeHtml(fromTime)} تا ${escapeHtml(toTime)}`,
     `${status.emoji} <b>وضعیت:</b> ${escapeHtml(status.label)}`,
     `📌 <b>نوع:</b> ${escapeHtml(details.typeLabel)}`,
@@ -213,7 +245,10 @@ function splitLongBlock(block: string, maxLength: number): string[] {
   return chunks;
 }
 
-function chunkBlocks(blocks: string[], maxLength = TELEGRAM_MESSAGE_LIMIT): string[] {
+function chunkBlocks(
+  blocks: string[],
+  maxLength = TELEGRAM_MESSAGE_LIMIT,
+): string[] {
   const expanded = blocks.flatMap((block) => splitLongBlock(block, maxLength));
   const chunks: string[] = [];
   let current = "";
@@ -454,9 +489,25 @@ async function handleTextMessage(
   chatId: string,
   text: string,
 ): Promise<void> {
-  if (text === "/start" || text === BACK_BUTTON) {
+  if (text === "/start" || text === MAIN_MENU_BUTTON) {
     await setChatSession(env.DB, chatId, null, false);
-    await sendMessage(env, chatId, "یک شهر را انتخاب کنید:", cityMenuKeyboard());
+    await sendMessage(
+      env,
+      chatId,
+      "استان موردنظر را انتخاب کنید:",
+      mainMenuKeyboard(),
+    );
+    return;
+  }
+
+  if (text === MAZANDARAN_BUTTON || text === CHANGE_CITY_BUTTON) {
+    await setChatSession(env.DB, chatId, null, false);
+    await sendMessage(
+      env,
+      chatId,
+      "یکی از شهرهای استان مازندران را انتخاب کنید:",
+      cityMenuKeyboard(),
+    );
     return;
   }
 
@@ -571,8 +622,8 @@ async function handleTextMessage(
   await sendMessage(
     env,
     chatId,
-    "برای شروع، یک شهر را انتخاب کنید.",
-    cityMenuKeyboard(),
+    "برای شروع، استان مازندران را انتخاب کنید.",
+    mainMenuKeyboard(),
   );
 }
 

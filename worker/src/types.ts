@@ -42,6 +42,19 @@ export interface OutageInput {
   from?: string;
   to?: string;
   date?: string;
+  outage_numbers?: unknown;
+  source_city_ids?: unknown;
+}
+
+export interface OutageObservationInput {
+  address?: unknown;
+  outage_number?: unknown;
+  source_city_id?: unknown;
+  date?: unknown;
+  from?: unknown;
+  type?: unknown;
+  reg_date?: unknown;
+  registerer?: unknown;
 }
 
 export interface NormalizedOutage {
@@ -52,6 +65,22 @@ export interface NormalizedOutage {
   fromTime: string;
   toTime: string;
   outageDate: string;
+  outageNumbers: string[];
+  sourceCityIds: string[];
+  fetchedAt: string;
+}
+
+export interface NormalizedOutageObservation {
+  cityKey: string;
+  outageDate: string;
+  normalizedAddress: string;
+  originalAddress: string;
+  outageNumber: string;
+  sourceCityId: string;
+  outageTime: string;
+  outageType: string;
+  registrationDate: string;
+  registerer: string;
   fetchedAt: string;
 }
 
@@ -63,6 +92,33 @@ export interface OutageRow {
   from_time: string;
   to_time: string;
   outage_date: string;
+  outage_numbers: string;
+  source_city_ids: string;
+  fetched_at: string;
+}
+
+export interface CitySyncStatus {
+  city_key: string;
+  fetched_at: string;
+  row_count: number;
+  updated_at: string;
+  active_date: string;
+  last_decision: string;
+  last_snapshot_date: string;
+  pending_date?: string | null;
+  pending_row_count?: number | null;
+  pending_consecutive_count?: number | null;
+}
+
+export interface PendingCitySnapshot {
+  city_key: string;
+  snapshot_date: string;
+  fingerprint: string;
+  rows_json: string;
+  row_count: number;
+  consecutive_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
   fetched_at: string;
 }
 
@@ -87,16 +143,25 @@ export interface TelegramUpdate {
   callback_query?: TelegramCallbackQuery;
 }
 
+export interface TelegramUser {
+  id: number;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+}
+
 export interface TelegramMessage {
   message_id: number;
   chat: {
     id: number;
   };
+  from?: TelegramUser;
   text?: string;
 }
 
 export interface TelegramCallbackQuery {
   id: string;
+  from?: TelegramUser;
   message?: TelegramMessage;
   data?: string;
 }

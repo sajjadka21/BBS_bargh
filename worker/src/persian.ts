@@ -19,6 +19,7 @@ export function normalizePersianText(value: string): string {
     .replace(/ك/g, "ک")
     .replace(/[0-9٠-٩]/g, mapDigitToPersian)
     .replace(/ـ/g, "")
+    .replace(/\s*[-‐‑‒–—−]+\s*/g, " - ")
     .replace(/\s+/g, " ")
     .trim();
 }
