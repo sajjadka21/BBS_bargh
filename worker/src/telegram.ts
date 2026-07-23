@@ -1,40 +1,77 @@
 import {
+  ADMIN_PANEL_BUTTON,
+  ADMIN_STATUS_BUTTON,
+  ADMIN_USERS_BUTTON,
+  ADMIN_CITIES_BUTTON,
+  ADMIN_ADD_CITY_BUTTON,
+  ADMIN_AUTO_SOURCE_BUTTON,
+  ADMIN_MANUAL_SOURCE_BUTTON,
   CANCEL_BUTTON,
   CHANGE_CITY_BUTTON,
-  CONFIRM_DELETE_BUTTON,
-  DELETE_PERSONAL_OUTAGE_BUTTON,
-  EDIT_PERSONAL_OUTAGE_BUTTON,
   MAIN_MENU_BUTTON,
   MAZANDARAN_BUTTON,
   PERSONAL_ADDRESS_MODE_BUTTON,
   PERSONAL_NUMBER_MODE_BUTTON,
   PERSONAL_OUTAGE_BUTTON,
+  REMINDER_30_BUTTON,
+  REMINDER_60_BUTTON,
+  REMINDER_NONE_BUTTON,
   SEARCH_BUTTON,
   SHOW_ALL_BUTTON,
+  adminMenuKeyboard,
+  adminSourceModeKeyboard,
   cityActionKeyboard,
   cityByKey,
   cityByLabel,
   cityMenuKeyboard,
-  deleteConfirmationKeyboard,
   mainMenuKeyboard,
   personalizationCityKeyboard,
   personalizationModeKeyboard,
-  personalizationProfileKeyboard,
+  personalizationReminderKeyboard,
 } from "./config";
+import {
+  acceptCitySourceProposal,
+  adminFlowSourceIds,
+  clearAdminFlow,
+  deactivateManagedCity,
+  findCityByLabel,
+  findSourceConflicts,
+  getAdminFlow,
+  getCitySourceProposal,
+  getManagedCity,
+  listManagedCities,
+  rejectCitySourceProposal,
+  requestCityDiscovery,
+  saveManagedCity,
+  setAdminFlow,
+} from "./cities";
 import {
   authorizeTelegramUser,
   claimUpdate,
   clearPersonalizationFlow,
   createNotificationBatch,
   deletePersonalOutageProfile,
+  getAdminSystemStats,
   getChatSession,
   getNotificationBatch,
   getPersonalOutageProfile,
   getPersonalizationFlow,
   getTelegramUser,
+  listAuthorizedPersonalProfilesByCity,
+  listAuthorizedPersonalProfilesWithReminders,
+  listAuthorizedTelegramUsers,
   listCityOutages,
+  listSentPersonalChangeEventKeys,
+  listSentReminderKeys,
+  listSyncStatuses,
+  listPersonalOutageProfiles,
+  listSentPersonalNotificationProfileIds,
   recordPasswordFailure,
+  recordPersonalChangeDeliveries,
+  recordPersonalNotificationDeliveries,
+  recordReminderDeliveries,
   releaseUpdate,
+  revokeTelegramUser,
   savePersonalOutageProfile,
   searchCityOutages,
   setChatSession,
@@ -43,24 +80,54 @@ import {
 } from "./database";
 import { normalizePersianText, toPersianDigits } from "./persian";
 import type {
+  AuthorizedPersonalProfile,
   Env,
   InlineKeyboardMarkup,
   OutageRow,
   PersonalMatchMode,
   PersonalOutageProfile,
   PersonalizationFlow,
-  ReplyKeyboardMarkup,
   TelegramCallbackQuery,
   TelegramMessage,
   TelegramReplyMarkup,
   TelegramUpdate,
   TelegramUser,
+  TelegramUserRecord,
 } from "./types";
 
 const TELEGRAM_MESSAGE_LIMIT = 3500;
 const RESULTS_PER_MESSAGE = 3;
 const TEHRAN_TIME_ZONE = "Asia/Tehran";
 const SHOW_NEW_OUTAGES_PREFIX = "show_new:";
+const PERSONAL_ADD_CALLBACK = "personal_add";
+const PERSONAL_DASHBOARD_CALLBACK = "personal_dashboard";
+const PERSONAL_SHOW_PREFIX = "personal_show:";
+const PERSONAL_EDIT_PREFIX = "personal_edit:";
+const PERSONAL_DELETE_PREFIX = "personal_delete:";
+const PERSONAL_DELETE_CONFIRM_PREFIX = "personal_delete_yes:";
+const MAIN_MENU_CALLBACK = "go_main";
+const ADMIN_HOME_CALLBACK = "admin_home";
+const ADMIN_REFRESH_CALLBACK = "admin_users";
+const ADMIN_STATUS_CALLBACK = "admin_status";
+const ADMIN_CITIES_CALLBACK = "admin_cities";
+const ADMIN_CITY_ADD_CALLBACK = "admin_city_add";
+const ADMIN_CITY_EDIT_PREFIX = "admin_city_edit:";
+const ADMIN_CITY_DISABLE_PREFIX = "admin_city_disable:";
+const ADMIN_CITY_DISABLE_CONFIRM_PREFIX = "admin_city_disable_yes:";
+const ADMIN_CITY_SAVE_CONFIRM_CALLBACK = "admin_city_save_yes";
+const ADMIN_CITY_DISCOVERY_CONFIRM_CALLBACK = "admin_city_discovery_yes";
+const ADMIN_CITY_ACCEPT_PREFIX = "admin_city_accept:";
+const ADMIN_CITY_REJECT_PREFIX = "admin_city_reject:";
+const ADMIN_REVOKE_PREFIX = "admin_revoke:";
+const ADMIN_REVOKE_CONFIRM_PREFIX = "admin_revoke_yes:";
+
+const PASSWORD_WINDOW_MINUTES = 15;
+const PERSONALIZATION_FLOW_PASSWORD = "awaiting_password";
+const PERSONALIZATION_FLOW_LABEL = "awaiting_label";
+const PERSONALIZATION_FLOW_CITY = "choosing_city";
+const PERSONALIZATION_FLOW_MODE = "choosing_mode";
+const PERSONALIZATION_FLOW_VALUE = "awaiting_value";
+const PERSONALIZATION_FLOW_REMINDER = "choosing_reminder";
 
 type DateParts = { year: number; month: number; day: number };
 type TehranNow = DateParts & { minutes: number };
@@ -90,7 +157,6 @@ function parseJalaliDate(value: string): DateParts | null {
   if (!match) {
     return null;
   }
-
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
@@ -111,7 +177,6 @@ function parseTimeMinutes(value: string): number | null {
   if (!match) {
     return null;
   }
-
   const hour = Number(match[1]);
   const minute = Number(match[2]);
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
@@ -130,7 +195,6 @@ function getTehranNowAt(date: Date): TehranNow | null {
     minute: "2-digit",
     hourCycle: "h23",
   }).formatToParts(date);
-
   const values = new Map(parts.map((part) => [part.type, part.value]));
   const year = Number(values.get("year"));
   const month = Number(values.get("month"));
@@ -158,16 +222,13 @@ function getOutageDisplayStatus(row: OutageRow): OutageDisplayStatus {
   const startMinutes = parseTimeMinutes(row.from_time);
   const endMinutes = parseTimeMinutes(row.to_time);
   const now = getTehranNow();
-
   if (!rowDate || startMinutes === null || !now) {
     return { label: "نامشخص", emoji: "⚪️" };
   }
-
   const dateOrder = compareDates(rowDate, now);
   if (dateOrder > 0 || (dateOrder === 0 && now.minutes < startMinutes)) {
     return { label: "برنامه‌ریزی‌شده", emoji: "🔵" };
   }
-
   if (dateOrder < 0) {
     const previousDay = getTehranNowAt(
       new Date(Date.now() - 24 * 60 * 60 * 1000),
@@ -183,11 +244,9 @@ function getOutageDisplayStatus(row: OutageRow): OutageDisplayStatus {
     }
     return { label: "برطرف‌شده", emoji: "🟢" };
   }
-
   if (endMinutes === null || endMinutes <= startMinutes) {
     return { label: "در حال انجام", emoji: "🟠" };
   }
-
   return now.minutes < endMinutes
     ? { label: "در حال انجام", emoji: "🟠" }
     : { label: "برطرف‌شده", emoji: "🟢" };
@@ -245,7 +304,6 @@ function formatOutage(
     outageNumbers.length > 0
       ? outageNumbers.map((value) => toPersianDigits(value)).join("، ")
       : "اعلام نشده";
-
   return [
     `⚡️ <b>خاموشی ${toPersianDigits(position)} از ${toPersianDigits(total)}</b>`,
     `🏙 <b>شهر:</b> ${escapeHtml(cityLabel)}`,
@@ -263,7 +321,6 @@ function splitLongBlock(block: string, maxLength: number): string[] {
   if (block.length <= maxLength) {
     return [block];
   }
-
   const chunks: string[] = [];
   for (let start = 0; start < block.length; start += maxLength) {
     chunks.push(block.slice(start, start + maxLength));
@@ -278,7 +335,6 @@ function chunkBlocks(
   const expanded = blocks.flatMap((block) => splitLongBlock(block, maxLength));
   const chunks: string[] = [];
   let current = "";
-
   for (const block of expanded) {
     const candidate = current ? `${current}\n\n${block}` : block;
     if (candidate.length > maxLength && current) {
@@ -288,7 +344,6 @@ function chunkBlocks(
       current = candidate;
     }
   }
-
   if (current) {
     chunks.push(current);
   }
@@ -308,7 +363,6 @@ async function callTelegram(
       body: JSON.stringify(payload),
     },
   );
-
   const body = (await response.json()) as {
     ok?: boolean;
     description?: string;
@@ -341,7 +395,7 @@ export async function sendBlocks(
   env: Env,
   chatId: string,
   blocks: string[],
-  keyboard?: ReplyKeyboardMarkup,
+  keyboard?: TelegramReplyMarkup,
 ): Promise<void> {
   const chunks = chunkBlocks(blocks);
   for (let index = 0; index < chunks.length; index += 1) {
@@ -364,7 +418,7 @@ async function sendOutageResults(
   cityLabel: string,
   rows: OutageRow[],
   title: string,
-  keyboard?: ReplyKeyboardMarkup,
+  keyboard?: TelegramReplyMarkup,
 ): Promise<void> {
   for (let start = 0; start < rows.length; start += RESULTS_PER_MESSAGE) {
     const pageRows = rows.slice(start, start + RESULTS_PER_MESSAGE);
@@ -373,11 +427,8 @@ async function sendOutageResults(
     const blocks = pageRows.map((row, index) =>
       formatOutage(cityLabel, row, start + index + 1, rows.length),
     );
-    const message = [header, ...blocks].join(
-      "\n\n━━━━━━━━━━━━\n\n",
-    );
+    const message = [header, ...blocks].join("\n\n━━━━━━━━━━━━\n\n");
     const pageKeyboard = end === rows.length ? keyboard : undefined;
-
     if (message.length <= TELEGRAM_MESSAGE_LIMIT) {
       await sendMessage(env, chatId, message, pageKeyboard);
     } else {
@@ -425,24 +476,17 @@ export async function notifyNewOutages(
   if (!chatId || rows.length === 0) {
     return;
   }
-
   const batchId = await createNotificationBatch(env.DB, chatId, cityKey, rows);
   const keyboard: InlineKeyboardMarkup = {
     inline_keyboard: [
-      [
-        {
-          text: "نمایش",
-          callback_data: `${SHOW_NEW_OUTAGES_PREFIX}${batchId}`,
-        },
-      ],
+      [{ text: "نمایش", callback_data: `${SHOW_NEW_OUTAGES_PREFIX}${batchId}` }],
+      [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
     ],
   };
-
   const countText =
     rows.length === 1
       ? "یک خاموشی جدید ثبت شد."
       : `${toPersianDigits(rows.length)} خاموشی جدید ثبت شد.`;
-
   await sendMessage(
     env,
     chatId,
@@ -456,66 +500,436 @@ export async function notifyNewOutages(
   );
 }
 
-async function handleCallbackQuery(
-  env: Env,
-  callbackQuery: TelegramCallbackQuery,
-): Promise<void> {
-  const data = callbackQuery.data?.trim() ?? "";
-  const chatId = callbackQuery.message
-    ? String(callbackQuery.message.chat.id)
-    : null;
+function normalizeOutageNumber(value: string): string {
+  return normalizeDigits(value).replace(/\s+/g, "").trim();
+}
 
-  if (!data.startsWith(SHOW_NEW_OUTAGES_PREFIX) || !chatId) {
-    await answerCallbackQuery(
-      env,
-      callbackQuery.id,
-      "این دکمه قابل استفاده نیست.",
-      true,
+function profileMatchesRows(
+  profile: Pick<PersonalOutageProfile, "match_mode" | "match_value">,
+  rows: OutageRow[],
+): OutageRow[] {
+  if (profile.match_mode === "address_keyword") {
+    const expected = normalizePersianText(profile.match_value);
+    return rows.filter((row) =>
+      normalizePersianText(row.address).includes(expected),
     );
-    return;
   }
-
-  const batchId = data.slice(SHOW_NEW_OUTAGES_PREFIX.length);
-  const batch = await getNotificationBatch(env.DB, batchId);
-  if (!batch || batch.chatId !== chatId) {
-    await answerCallbackQuery(
-      env,
-      callbackQuery.id,
-      "جزئیات این اعلان دیگر در دسترس نیست.",
-      true,
-    );
-    return;
-  }
-
-  const city = cityByKey(batch.cityKey);
-  if (!city || batch.rows.length === 0) {
-    await answerCallbackQuery(
-      env,
-      callbackQuery.id,
-      "اطلاعات این اعلان کامل نیست.",
-      true,
-    );
-    return;
-  }
-
-  await answerCallbackQuery(env, callbackQuery.id, "در حال نمایش جزئیات…");
-  await setChatSession(env.DB, chatId, city.key, false);
-  await sendOutageResults(
-    env,
-    chatId,
-    city.label,
-    batch.rows,
-    `⚡️ <b>خاموشی‌های جدید ${escapeHtml(city.label)}</b>`,
-    cityActionKeyboard(),
+  const expected = normalizeOutageNumber(profile.match_value);
+  return rows.filter((row) =>
+    parseStoredStringArray(row.outage_numbers).some(
+      (number) => normalizeOutageNumber(number) === expected,
+    ),
   );
 }
 
-const PASSWORD_WINDOW_MINUTES = 15;
-const PERSONALIZATION_FLOW_PASSWORD = "awaiting_password";
-const PERSONALIZATION_FLOW_CITY = "choosing_city";
-const PERSONALIZATION_FLOW_MODE = "choosing_mode";
-const PERSONALIZATION_FLOW_VALUE = "awaiting_value";
-const PERSONALIZATION_FLOW_DELETE = "confirm_delete";
+export async function notifyPersonalOutagesForCityDate(
+  env: Env,
+  cityKey: string,
+  cityLabel: string,
+  snapshotDate: string,
+  rows: OutageRow[],
+): Promise<{ usersNotified: number; profilesNotified: number; errors: string[] }> {
+  if (rows.length === 0) {
+    return { usersNotified: 0, profilesNotified: 0, errors: [] };
+  }
+  const profiles = await listAuthorizedPersonalProfilesByCity(env.DB, cityKey);
+  const sentProfileIds = await listSentPersonalNotificationProfileIds(
+    env.DB,
+    cityKey,
+    snapshotDate,
+  );
+  const grouped = new Map<
+    string,
+    {
+      chatId: string;
+      profiles: Array<{
+        profile: AuthorizedPersonalProfile;
+        rows: OutageRow[];
+      }>;
+    }
+  >();
+  for (const profile of profiles) {
+    if (sentProfileIds.has(profile.profile_id)) {
+      continue;
+    }
+    const matches = profileMatchesRows(profile, rows);
+    if (matches.length === 0) {
+      continue;
+    }
+    const current = grouped.get(profile.telegram_user_id) ?? {
+      chatId: profile.chat_id,
+      profiles: [],
+    };
+    current.profiles.push({ profile, rows: matches });
+    grouped.set(profile.telegram_user_id, current);
+  }
+
+  let usersNotified = 0;
+  let profilesNotified = 0;
+  const errors: string[] = [];
+  for (const [telegramUserId, group] of grouped) {
+    const uniqueRows = new Map<string, OutageRow>();
+    for (const item of group.profiles) {
+      for (const row of item.rows) {
+        uniqueRows.set(row.outage_key, row);
+      }
+    }
+    const labels = group.profiles
+      .map((item) => escapeHtml(item.profile.profile_label))
+      .join("، ");
+    try {
+      await sendOutageResults(
+        env,
+        group.chatId,
+        cityLabel,
+        [...uniqueRows.values()],
+        [
+          "🔔 <b>اعلان خودکار خاموشی من</b>",
+          `📅 <b>برنامه:</b> ${escapeHtml(snapshotDate)}`,
+          `🏷 <b>تنظیم‌های مطابق:</b> ${labels}`,
+        ].join("\n"),
+      );
+      await recordPersonalNotificationDeliveries(
+        env.DB,
+        snapshotDate,
+        group.profiles.map((item) => ({
+          profile: item.profile,
+          matchedOutageKeys: item.rows.map((row) => row.outage_key),
+        })),
+      );
+      usersNotified += 1;
+      profilesNotified += group.profiles.length;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown Telegram error";
+      errors.push(`${telegramUserId}: ${message}`);
+      console.error("Personal outage notification failed:", error);
+    }
+  }
+  return { usersNotified, profilesNotified, errors };
+}
+
+
+interface PersonalChangeEvent {
+  eventKey: string;
+  profile: AuthorizedPersonalProfile;
+  changeType: "added" | "updated";
+  previousRow: OutageRow | null;
+  currentRow: OutageRow;
+}
+
+function outageComparableSignature(row: OutageRow): string {
+  return JSON.stringify({
+    address: normalizePersianText(row.address),
+    from: row.from_time,
+    to: row.to_time,
+    type: row.outage_type,
+    numbers: parseStoredStringArray(row.outage_numbers).sort(),
+  });
+}
+
+async function sha256Text(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function formatNumberList(value: string): string {
+  const values = parseStoredStringArray(value);
+  return values.length > 0
+    ? values.map((item) => toPersianDigits(item)).join("، ")
+    : "اعلام نشده";
+}
+
+function formatPersonalChangeEvent(
+  cityLabel: string,
+  event: PersonalChangeEvent,
+): string {
+  const profileLabel = escapeHtml(event.profile.profile_label);
+  const current = event.currentRow;
+  if (event.changeType === "added" || !event.previousRow) {
+    return [
+      `➕ <b>مورد جدید مطابق «${profileLabel}»</b>`,
+      `🏙 ${escapeHtml(cityLabel)}`,
+      `📍 ${escapeHtml(current.address)}`,
+      `📅 ${escapeHtml(current.outage_date)}`,
+      `🕒 ${escapeHtml(current.from_time || "اعلام نشده")} تا ${escapeHtml(current.to_time || "اعلام نشده")}`,
+      `🔢 ${escapeHtml(formatNumberList(current.outage_numbers))}`,
+    ].join("\n");
+  }
+
+  const previous = event.previousRow;
+  const lines = [
+    `🔄 <b>تغییر برنامه «${profileLabel}»</b>`,
+    `🏙 ${escapeHtml(cityLabel)}`,
+    `📍 ${escapeHtml(current.address)}`,
+  ];
+  if (
+    previous.from_time !== current.from_time ||
+    previous.to_time !== current.to_time
+  ) {
+    lines.push(
+      `🕒 قبلی: ${escapeHtml(previous.from_time || "اعلام نشده")} تا ${escapeHtml(previous.to_time || "اعلام نشده")}`,
+      `🕒 جدید: ${escapeHtml(current.from_time || "اعلام نشده")} تا ${escapeHtml(current.to_time || "اعلام نشده")}`,
+    );
+  }
+  if (previous.outage_numbers !== current.outage_numbers) {
+    lines.push(
+      `🔢 شماره قبلی: ${escapeHtml(formatNumberList(previous.outage_numbers))}`,
+      `🔢 شماره جدید: ${escapeHtml(formatNumberList(current.outage_numbers))}`,
+    );
+  }
+  if (previous.outage_type !== current.outage_type) {
+    lines.push(
+      `📝 توضیح قبلی: ${escapeHtml(previous.outage_type || "اعلام نشده")}`,
+      `📝 توضیح جدید: ${escapeHtml(current.outage_type || "اعلام نشده")}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export async function notifyPersonalOutageChangesForCityDate(
+  env: Env,
+  cityKey: string,
+  cityLabel: string,
+  snapshotDate: string,
+  previousRows: OutageRow[],
+  currentRows: OutageRow[],
+): Promise<{ usersNotified: number; eventsNotified: number; errors: string[] }> {
+  const previousByKey = new Map(
+    previousRows.map((row) => [row.outage_key, row] as const),
+  );
+  const rawChanges: Array<{
+    changeType: "added" | "updated";
+    previousRow: OutageRow | null;
+    currentRow: OutageRow;
+  }> = [];
+  for (const currentRow of currentRows) {
+    const previousRow = previousByKey.get(currentRow.outage_key) ?? null;
+    if (!previousRow) {
+      rawChanges.push({ changeType: "added", previousRow, currentRow });
+      continue;
+    }
+    if (
+      outageComparableSignature(previousRow) !==
+      outageComparableSignature(currentRow)
+    ) {
+      rawChanges.push({ changeType: "updated", previousRow, currentRow });
+    }
+  }
+  if (rawChanges.length === 0) {
+    return { usersNotified: 0, eventsNotified: 0, errors: [] };
+  }
+
+  const [profiles, sentDailyProfileIds, sentEventKeys] = await Promise.all([
+    listAuthorizedPersonalProfilesByCity(env.DB, cityKey),
+    listSentPersonalNotificationProfileIds(env.DB, cityKey, snapshotDate),
+    listSentPersonalChangeEventKeys(env.DB, cityKey, snapshotDate),
+  ]);
+  const grouped = new Map<
+    string,
+    { chatId: string; events: PersonalChangeEvent[] }
+  >();
+
+  for (const profile of profiles) {
+    // A change alert is only useful after this profile has already received its
+    // first daily notification for the date. Otherwise the normal daily alert
+    // below will deliver the current version once.
+    if (!sentDailyProfileIds.has(profile.profile_id)) {
+      continue;
+    }
+    for (const rawChange of rawChanges) {
+      const oldMatch = rawChange.previousRow
+        ? profileMatchesRows(profile, [rawChange.previousRow]).length > 0
+        : false;
+      const newMatch =
+        profileMatchesRows(profile, [rawChange.currentRow]).length > 0;
+      if (!oldMatch && !newMatch) {
+        continue;
+      }
+      const eventKey = await sha256Text(
+        [
+          profile.profile_id,
+          snapshotDate,
+          rawChange.currentRow.outage_key,
+          rawChange.changeType,
+          rawChange.previousRow
+            ? outageComparableSignature(rawChange.previousRow)
+            : "",
+          outageComparableSignature(rawChange.currentRow),
+        ].join("\u001f"),
+      );
+      if (sentEventKeys.has(eventKey)) {
+        continue;
+      }
+      const current = grouped.get(profile.telegram_user_id) ?? {
+        chatId: profile.chat_id,
+        events: [],
+      };
+      current.events.push({ eventKey, profile, ...rawChange });
+      grouped.set(profile.telegram_user_id, current);
+    }
+  }
+
+  let usersNotified = 0;
+  let eventsNotified = 0;
+  const errors: string[] = [];
+  for (const [telegramUserId, group] of grouped) {
+    try {
+      await sendBlocks(env, group.chatId, [
+        "🔄 <b>تغییر برنامه خاموشی من</b>",
+        ...group.events.map((event) => formatPersonalChangeEvent(cityLabel, event)),
+      ]);
+      await recordPersonalChangeDeliveries(
+        env.DB,
+        group.events.map((event) => ({
+          eventKey: event.eventKey,
+          profile: event.profile,
+          snapshotDate,
+          outageKey: event.currentRow.outage_key,
+          changeType: event.changeType,
+        })),
+      );
+      usersNotified += 1;
+      eventsNotified += group.events.length;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown Telegram error";
+      errors.push(`${telegramUserId}: ${message}`);
+      console.error("Personal outage change notification failed:", error);
+    }
+  }
+  return { usersNotified, eventsNotified, errors };
+}
+
+function datePartsToPersianText(parts: DateParts): string {
+  return `${String(parts.year).padStart(4, "0")}/${String(parts.month).padStart(2, "0")}/${String(parts.day).padStart(2, "0")}`
+    .replace(/[0-9]/g, (digit) => toPersianDigits(digit));
+}
+
+function minutesUntilOutage(
+  row: OutageRow,
+  now: TehranNow,
+  tomorrow: DateParts,
+): number | null {
+  const rowDate = parseJalaliDate(row.outage_date);
+  const start = parseTimeMinutes(row.from_time);
+  if (!rowDate || start === null) {
+    return null;
+  }
+  if (compareDates(rowDate, now) === 0) {
+    return start - now.minutes;
+  }
+  if (compareDates(rowDate, tomorrow) === 0) {
+    return 24 * 60 - now.minutes + start;
+  }
+  return null;
+}
+
+export async function runScheduledPersonalReminders(
+  env: Env,
+): Promise<{ usersNotified: number; remindersSent: number; errors: string[] }> {
+  const nowDate = new Date();
+  const now = getTehranNowAt(nowDate);
+  const tomorrow = getTehranNowAt(
+    new Date(nowDate.getTime() + 24 * 60 * 60 * 1000),
+  );
+  if (!now || !tomorrow) {
+    throw new Error("Could not resolve Tehran date for reminder processing.");
+  }
+  const profiles = await listAuthorizedPersonalProfilesWithReminders(env.DB);
+  if (profiles.length === 0) {
+    return { usersNotified: 0, remindersSent: 0, errors: [] };
+  }
+
+  const dateTexts = [
+    datePartsToPersianText(now),
+    datePartsToPersianText(tomorrow),
+  ];
+  const sentKeys = await listSentReminderKeys(env.DB, dateTexts);
+  const rowsByCity = new Map<string, OutageRow[]>();
+  const grouped = new Map<
+    string,
+    {
+      chatId: string;
+      items: Array<{
+        profile: AuthorizedPersonalProfile;
+        row: OutageRow;
+        minutesUntil: number;
+      }>;
+    }
+  >();
+
+  for (const profile of profiles) {
+    let cityRows = rowsByCity.get(profile.city_key);
+    if (!cityRows) {
+      cityRows = await listCityOutages(env.DB, profile.city_key);
+      rowsByCity.set(profile.city_key, cityRows);
+    }
+    for (const row of profileMatchesRows(profile, cityRows)) {
+      const remaining = minutesUntilOutage(row, now, tomorrow);
+      if (
+        remaining === null ||
+        remaining <= 0 ||
+        remaining > profile.reminder_minutes
+      ) {
+        continue;
+      }
+      const key = `${profile.profile_id}|${row.outage_date}|${row.outage_key}|${profile.reminder_minutes}`;
+      if (sentKeys.has(key)) {
+        continue;
+      }
+      const current = grouped.get(profile.telegram_user_id) ?? {
+        chatId: profile.chat_id,
+        items: [],
+      };
+      current.items.push({ profile, row, minutesUntil: remaining });
+      grouped.set(profile.telegram_user_id, current);
+    }
+  }
+
+  let usersNotified = 0;
+  let remindersSent = 0;
+  const errors: string[] = [];
+  for (const [telegramUserId, group] of grouped) {
+    const blocks = group.items.map(({ profile, row, minutesUntil }) => {
+      const city = cityByKey(profile.city_key);
+      return [
+        `⏰ <b>${escapeHtml(profile.profile_label)}</b>`,
+        `🏙 ${escapeHtml(city?.label ?? profile.city_key)}`,
+        `📍 ${escapeHtml(row.address)}`,
+        `🕒 ${escapeHtml(row.from_time)} تا ${escapeHtml(row.to_time || "اعلام نشده")}`,
+        `⌛️ شروع حدود ${toPersianDigits(minutesUntil)} دقیقه دیگر`,
+      ].join("\n");
+    });
+    try {
+      await sendBlocks(env, group.chatId, [
+        "⏰ <b>یادآوری خاموشی</b>",
+        ...blocks,
+      ]);
+      await recordReminderDeliveries(
+        env.DB,
+        group.items.map(({ profile, row }) => ({
+          profile,
+          snapshotDate: row.outage_date,
+          outageKey: row.outage_key,
+        })),
+      );
+      usersNotified += 1;
+      remindersSent += group.items.length;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown Telegram error";
+      errors.push(`${telegramUserId}: ${message}`);
+      console.error("Personal outage reminder failed:", error);
+    }
+  }
+  return { usersNotified, remindersSent, errors };
+}
 
 function secureTextEquals(left: string, right: string): boolean {
   const encoder = new TextEncoder();
@@ -529,22 +943,14 @@ function secureTextEquals(left: string, right: string): boolean {
   return difference === 0;
 }
 
-function normalizeOutageNumber(value: string): string {
-  return value
-    .replace(/[\u06F0-\u06F9]/g, (digit) =>
-      String(digit.charCodeAt(0) - 0x06f0),
-    )
-    .replace(/[\u0660-\u0669]/g, (digit) =>
-      String(digit.charCodeAt(0) - 0x0660),
-    )
-    .replace(/\s+/g, "")
-    .trim();
-}
-
-function isPrivateConversation(message: TelegramMessage, user: TelegramUser): boolean {
+function isPrivateConversation(
+  message: TelegramMessage,
+  user: TelegramUser,
+): boolean {
   return (
     message.chat.type === "private" ||
-    (message.chat.type === undefined && String(message.chat.id) === String(user.id))
+    (message.chat.type === undefined &&
+      String(message.chat.id) === String(user.id))
   );
 }
 
@@ -556,49 +962,128 @@ function activeLockMinutes(lockedUntil: string | null): number {
   return remaining > 0 ? Math.max(1, Math.ceil(remaining / 60000)) : 0;
 }
 
-async function beginPersonalizationSetup(
-  env: Env,
-  chatId: string,
-  telegramUserId: string,
-): Promise<void> {
-  await setPersonalizationFlow(
-    env.DB,
-    telegramUserId,
-    chatId,
-    PERSONALIZATION_FLOW_CITY,
-    null,
-    null,
-  );
-  await sendMessage(
-    env,
-    chatId,
-    "شهر مربوط به <b>خاموشی من</b> را انتخاب کنید:",
-    personalizationCityKeyboard(),
-  );
+function isAdmin(env: Env, telegramUserId: string | null): boolean {
+  const configured = env.ADMIN_TELEGRAM_USER_ID?.trim() ?? "";
+  return Boolean(configured && telegramUserId && configured === telegramUserId);
+}
+
+function mainMenuFor(env: Env, telegramUserId: string | null) {
+  return mainMenuKeyboard(isAdmin(env, telegramUserId));
 }
 
 function profileModeLabel(mode: PersonalMatchMode): string {
   return mode === "outage_number" ? "شماره خاموشی" : "کلمه آدرس";
 }
 
-async function findPersonalMatches(
-  env: Env,
-  profile: PersonalOutageProfile,
-): Promise<OutageRow[]> {
-  if (profile.match_mode === "address_keyword") {
-    return searchCityOutages(env.DB, profile.city_key, profile.match_value);
+function reminderLabel(minutes: number): string {
+  if (minutes === 60) {
+    return "۶۰ دقیقه قبل";
   }
+  if (minutes === 30) {
+    return "۳۰ دقیقه قبل";
+  }
+  return "بدون یادآوری";
+}
 
-  const expectedNumber = normalizeOutageNumber(profile.match_value);
-  const rows = await listCityOutages(env.DB, profile.city_key);
-  return rows.filter((row) =>
-    parseStoredStringArray(row.outage_numbers).some(
-      (number) => normalizeOutageNumber(number) === expectedNumber,
-    ),
+function reminderMinutesFromButton(text: string): number | null {
+  if (text === REMINDER_60_BUTTON) {
+    return 60;
+  }
+  if (text === REMINDER_30_BUTTON) {
+    return 30;
+  }
+  if (text === REMINDER_NONE_BUTTON) {
+    return 0;
+  }
+  return null;
+}
+
+function profileDisplayValue(profile: PersonalOutageProfile): string {
+  return profile.match_mode === "outage_number"
+    ? toPersianDigits(profile.match_value)
+    : profile.match_value;
+}
+
+function personalDashboardKeyboard(
+  profiles: PersonalOutageProfile[],
+): InlineKeyboardMarkup {
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
+  profiles.forEach((profile, index) => {
+    rows.push([
+      {
+        text: `🔎 ${toPersianDigits(index + 1)}. ${profile.profile_label}`,
+        callback_data: `${PERSONAL_SHOW_PREFIX}${profile.profile_id}`,
+      },
+    ]);
+    rows.push([
+      {
+        text: "✏️ ویرایش",
+        callback_data: `${PERSONAL_EDIT_PREFIX}${profile.profile_id}`,
+      },
+      {
+        text: "🗑 حذف",
+        callback_data: `${PERSONAL_DELETE_PREFIX}${profile.profile_id}`,
+      },
+    ]);
+  });
+  if (profiles.length < 3) {
+    rows.push([{ text: "➕ افزودن خاموشی", callback_data: PERSONAL_ADD_CALLBACK }]);
+  }
+  rows.push([{ text: "🔄 تازه‌سازی", callback_data: PERSONAL_DASHBOARD_CALLBACK }]);
+  rows.push([{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }]);
+  return { inline_keyboard: rows };
+}
+
+function personalProfileActionsKeyboard(
+  profile: PersonalOutageProfile,
+): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "✏️ ویرایش",
+          callback_data: `${PERSONAL_EDIT_PREFIX}${profile.profile_id}`,
+        },
+        {
+          text: "🗑 حذف",
+          callback_data: `${PERSONAL_DELETE_PREFIX}${profile.profile_id}`,
+        },
+      ],
+      [{ text: "⬅️ فهرست خاموشی من", callback_data: PERSONAL_DASHBOARD_CALLBACK }],
+      [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+    ],
+  };
+}
+
+async function showPersonalDashboard(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  const profiles = await listPersonalOutageProfiles(env.DB, telegramUserId);
+  const lines = ["⚡️ <b>خاموشی من</b>"];
+  if (profiles.length === 0) {
+    lines.push("", "هنوز خاموشی شخصی ذخیره نکرده‌اید.");
+  } else {
+    lines.push("", `می‌توانید حداکثر ۳ تنظیم ذخیره کنید. اکنون ${toPersianDigits(profiles.length)} تنظیم دارید.`, "");
+    profiles.forEach((profile, index) => {
+      const city = cityByKey(profile.city_key);
+      lines.push(
+        `${toPersianDigits(index + 1)}. <b>${escapeHtml(profile.profile_label)}</b> — ${escapeHtml(city?.label ?? profile.city_key)}`,
+        `   ${escapeHtml(profileModeLabel(profile.match_mode))}: ${escapeHtml(profileDisplayValue(profile))}`,
+        `   یادآوری: ${escapeHtml(reminderLabel(profile.reminder_minutes))}`,
+      );
+    });
+  }
+  await sendMessage(
+    env,
+    chatId,
+    lines.join("\n"),
+    personalDashboardKeyboard(profiles),
   );
 }
 
-async function showPersonalOutage(
+async function showPersonalProfile(
   env: Env,
   chatId: string,
   profile: PersonalOutageProfile,
@@ -608,46 +1093,78 @@ async function showPersonalOutage(
     await sendMessage(
       env,
       chatId,
-      "شهر ذخیره‌شده دیگر معتبر نیست. تنظیم «خاموشی من» را ویرایش کنید.",
-      personalizationProfileKeyboard(),
+      "شهر ذخیره‌شده دیگر معتبر نیست. این تنظیم را ویرایش یا حذف کنید.",
+      personalProfileActionsKeyboard(profile),
     );
     return;
   }
-
-  const modeLabel = profileModeLabel(profile.match_mode);
-  const displayValue =
-    profile.match_mode === "outage_number"
-      ? toPersianDigits(profile.match_value)
-      : profile.match_value;
-  const rows = await findPersonalMatches(env, profile);
-
+  const rows = profileMatchesRows(
+    profile,
+    await listCityOutages(env.DB, profile.city_key),
+  );
+  const title = [
+    `⚡️ <b>${escapeHtml(profile.profile_label)}</b>`,
+    `<b>${escapeHtml(profileModeLabel(profile.match_mode))}:</b> ${escapeHtml(profileDisplayValue(profile))}`,
+    `⏰ <b>یادآوری:</b> ${escapeHtml(reminderLabel(profile.reminder_minutes))}`,
+  ].join("\n");
   if (rows.length === 0) {
     await sendMessage(
       env,
       chatId,
-      [
-        "⚡️ <b>خاموشی من</b>",
-        `🏙 <b>شهر:</b> ${escapeHtml(city.label)}`,
-        `🔎 <b>روش:</b> ${escapeHtml(modeLabel)}`,
-        `🧩 <b>مقدار:</b> ${escapeHtml(displayValue)}`,
-        "",
-        "در فهرست فعال فعلی، خاموشی مطابق این تنظیم پیدا نشد.",
-      ].join("\n"),
-      personalizationProfileKeyboard(),
+      [title, "", "در فهرست فعال فعلی، مورد مطابقی پیدا نشد."].join("\n"),
+      personalProfileActionsKeyboard(profile),
     );
     return;
   }
-
   await sendOutageResults(
     env,
     chatId,
     city.label,
     rows,
-    [
-      "⚡️ <b>خاموشی من</b>",
-      `<b>${escapeHtml(modeLabel)}:</b> ${escapeHtml(displayValue)}`,
-    ].join("\n"),
-    personalizationProfileKeyboard(),
+    title,
+    personalProfileActionsKeyboard(profile),
+  );
+}
+
+async function beginPersonalizationSetup(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+  profileId: string | null = null,
+): Promise<void> {
+  let profile: PersonalOutageProfile | null = null;
+  if (profileId) {
+    profile = await getPersonalOutageProfile(env.DB, telegramUserId, profileId);
+    if (!profile) {
+      await sendMessage(env, chatId, "این تنظیم پیدا نشد.");
+      await showPersonalDashboard(env, chatId, telegramUserId);
+      return;
+    }
+  } else {
+    const profiles = await listPersonalOutageProfiles(env.DB, telegramUserId);
+    if (profiles.length >= 3) {
+      await sendMessage(env, chatId, "حداکثر ۳ تنظیم «خاموشی من» قابل ذخیره است.");
+      await showPersonalDashboard(env, chatId, telegramUserId);
+      return;
+    }
+  }
+  await setPersonalizationFlow(
+    env.DB,
+    telegramUserId,
+    chatId,
+    PERSONALIZATION_FLOW_LABEL,
+    profile?.city_key ?? null,
+    profile?.match_mode ?? null,
+    profile?.profile_id ?? null,
+    profile?.profile_label ?? null,
+    profile?.match_value ?? null,
+  );
+  await sendMessage(
+    env,
+    chatId,
+    profile
+      ? `یک نام برای این تنظیم بفرستید. نام فعلی: <b>${escapeHtml(profile.profile_label)}</b>`
+      : "یک نام کوتاه برای این تنظیم بفرستید؛ مثلاً «خانه»، «محل کار» یا «مغازه».",
   );
 }
 
@@ -660,29 +1177,26 @@ async function ensureAuthorizedUser(
   if (user?.is_authorized === 1) {
     return true;
   }
-
   const lockMinutes = activeLockMinutes(user?.locked_until ?? null);
   if (lockMinutes > 0) {
     await sendMessage(
       env,
       chatId,
       `به‌دلیل چند تلاش ناموفق، ورود موقتاً قفل است. حدود ${toPersianDigits(lockMinutes)} دقیقه دیگر دوباره امتحان کنید.`,
-      mainMenuKeyboard(),
+      mainMenuFor(env, telegramUserId),
     );
     return false;
   }
-
   const configuredPassword = env.PERSONALIZATION_PASSWORD?.trim() ?? "";
   if (!configuredPassword) {
     await sendMessage(
       env,
       chatId,
       "قابلیت «خاموشی من» هنوز توسط مدیر فعال نشده است.",
-      mainMenuKeyboard(),
+      mainMenuFor(env, telegramUserId),
     );
     return false;
   }
-
   await setPersonalizationFlow(
     env.DB,
     telegramUserId,
@@ -706,7 +1220,6 @@ async function openPersonalOutage(
 ): Promise<void> {
   const chatId = String(message.chat.id);
   const telegramUserId = String(telegramUser.id);
-
   if (!isPrivateConversation(message, telegramUser)) {
     await sendMessage(
       env,
@@ -715,19 +1228,474 @@ async function openPersonalOutage(
     );
     return;
   }
-
   const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
   if (!authorized) {
     return;
   }
-
   await clearPersonalizationFlow(env.DB, telegramUserId);
-  const profile = await getPersonalOutageProfile(env.DB, telegramUserId);
-  if (!profile) {
-    await beginPersonalizationSetup(env, chatId, telegramUserId);
+  await showPersonalDashboard(env, chatId, telegramUserId);
+}
+
+function adminUserDisplay(user: TelegramUserRecord): string {
+  const name = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  const username = user.username ? `@${user.username}` : "";
+  return name || username || user.telegram_user_id;
+}
+
+async function generateCityKey(label: string): Promise<string> {
+  const normalized = normalizePersianText(label);
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(normalized),
+  );
+  const suffix = [...new Uint8Array(digest)]
+    .slice(0, 6)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `city_${suffix}`;
+}
+
+function parseAdminSourceIds(text: string): {
+  ids: number[];
+  duplicates: number[];
+  invalid: string[];
+} {
+  const ascii = normalizeDigits(text);
+  const tokens = ascii
+    .split(/[\s,،;؛|/]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const ids: number[] = [];
+  const duplicates: number[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<number>();
+  for (const token of tokens) {
+    if (!/^\d+$/.test(token)) {
+      invalid.push(token);
+      continue;
+    }
+    const value = Number(token);
+    if (!Number.isInteger(value) || value <= 0 || value > 1000000) {
+      invalid.push(token);
+      continue;
+    }
+    if (seen.has(value)) {
+      duplicates.push(value);
+      continue;
+    }
+    seen.add(value);
+    ids.push(value);
+  }
+  ids.sort((a, b) => a - b);
+  return { ids, duplicates: [...new Set(duplicates)], invalid };
+}
+
+async function openAdminHome(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  if (!isAdmin(env, telegramUserId)) {
+    await sendMessage(env, chatId, "دسترسی مدیریت برای این حساب فعال نیست.");
     return;
   }
-  await showPersonalOutage(env, chatId, profile);
+  await clearAdminFlow(env.DB, telegramUserId);
+  await sendMessage(
+    env,
+    chatId,
+    "🛡 <b>پنل مدیریت</b>\n\nیکی از بخش‌ها را انتخاب کنید:",
+    adminMenuKeyboard(),
+  );
+}
+
+async function openAdminUsers(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  if (!isAdmin(env, telegramUserId)) {
+    await sendMessage(env, chatId, "دسترسی مدیریت برای این حساب فعال نیست.");
+    return;
+  }
+  const users = await listAuthorizedTelegramUsers(env.DB, 50);
+  const keyboard: InlineKeyboardMarkup = {
+    inline_keyboard: [
+      ...users.map((user) => [
+        {
+          text: `🚫 ${adminUserDisplay(user).slice(0, 28)} | ${user.telegram_user_id}`,
+          callback_data: `${ADMIN_REVOKE_PREFIX}${user.telegram_user_id}`,
+        },
+      ]),
+      [{ text: "🔄 تازه‌سازی", callback_data: ADMIN_REFRESH_CALLBACK }],
+      [{ text: "⬅️ پنل مدیریت", callback_data: ADMIN_HOME_CALLBACK }],
+      [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+    ],
+  };
+  await sendMessage(
+    env,
+    chatId,
+    users.length > 0
+      ? `👥 <b>مدیریت کاربران</b>\n\nبرای لغو دسترسی، روی کاربر بزنید. قبل از لغو، تأیید جداگانه گرفته می‌شود. ${toPersianDigits(users.length)} کاربر مجاز نمایش داده شده است.`
+      : "👥 <b>مدیریت کاربران</b>\n\nکاربر مجازی وجود ندارد.",
+    keyboard,
+  );
+}
+
+function cityStatusLabel(city: {
+  is_active: number;
+  discovery_status: string;
+  source_city_ids: number[];
+}): string {
+  if (city.is_active === 1) return "فعال";
+  if (city.discovery_status === "requested") return "در انتظار کشف";
+  if (city.discovery_status === "proposal_ready") return "در انتظار تأیید";
+  if (city.discovery_status === "failed") return "کشف ناموفق";
+  return "غیرفعال";
+}
+
+async function openAdminCities(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  if (!isAdmin(env, telegramUserId)) {
+    await sendMessage(env, chatId, "دسترسی مدیریت برای این حساب فعال نیست.");
+    return;
+  }
+  const cities = await listManagedCities(env.DB);
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [
+    [{ text: "➕ افزودن شهر", callback_data: ADMIN_CITY_ADD_CALLBACK }],
+  ];
+  for (const city of cities) {
+    rows.push([
+      {
+        text: `✏️ ${city.label} (${toPersianDigits(city.source_city_ids.length)})`,
+        callback_data: `${ADMIN_CITY_EDIT_PREFIX}${city.key}`,
+      },
+      {
+        text: city.is_active === 1 ? "⛔ غیرفعال" : "ℹ️ جزئیات",
+        callback_data: `${ADMIN_CITY_DISABLE_PREFIX}${city.key}`,
+      },
+    ]);
+  }
+  rows.push([{ text: "🔄 تازه‌سازی", callback_data: ADMIN_CITIES_CALLBACK }]);
+  rows.push([{ text: "⬅️ پنل مدیریت", callback_data: ADMIN_HOME_CALLBACK }]);
+  rows.push([{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }]);
+
+  const details = cities.length === 0
+    ? "هنوز شهری ثبت نشده است."
+    : cities.map((city) =>
+        `• <b>${escapeHtml(city.label)}</b> — ${cityStatusLabel(city)} — منابع: ${city.source_city_ids.length > 0 ? city.source_city_ids.map(toPersianDigits).join("، ") : "ثبت نشده"}`,
+      ).join("\n");
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "🏙 <b>مدیریت شهرها</b>",
+      "",
+      details,
+      "",
+      "برای تغییر شماره‌ها روی نام شهر بزنید. غیرفعال‌سازی، شهر را از منو و Fetch حذف می‌کند ولی تاریخچه و پروفایل‌ها را پاک نمی‌کند.",
+    ].join("\n"),
+    { inline_keyboard: rows },
+  );
+}
+
+async function beginAdminAddCity(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  await setAdminFlow(
+    env.DB,
+    telegramUserId,
+    chatId,
+    "awaiting_city_label",
+    null,
+    null,
+  );
+  await sendMessage(
+    env,
+    chatId,
+    "نام شهر را دقیقاً مطابق نام نمایش‌داده‌شده در Maztozi وارد کنید؛ مثلاً «نکا».",
+    {
+      keyboard: [[{ text: CANCEL_BUTTON }, { text: MAIN_MENU_BUTTON }]],
+      resize_keyboard: true,
+      is_persistent: true,
+    },
+  );
+}
+
+async function showAdminCitySaveConfirmation(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  const flow = await getAdminFlow(env.DB, telegramUserId);
+  if (!flow?.city_key || !flow.city_label) return;
+  const ids = adminFlowSourceIds(flow);
+  const conflicts = await findSourceConflicts(env.DB, ids, flow.city_key);
+  if (conflicts.length > 0) {
+    await sendMessage(
+      env,
+      chatId,
+      [
+        "⚠️ <b>امکان ذخیره وجود ندارد</b>",
+        "شماره‌های زیر قبلاً برای شهر دیگری فعال هستند:",
+        ...conflicts.map((row) =>
+          `• ${toPersianDigits(row.source_city_id)} — ${escapeHtml(row.city_label)}`,
+        ),
+        "",
+        "شماره‌ها را اصلاح و دوباره ارسال کنید.",
+      ].join("\n"),
+    );
+    return;
+  }
+  const keyboard: InlineKeyboardMarkup = {
+    inline_keyboard: [
+      [
+        { text: "✅ تأیید و ذخیره", callback_data: ADMIN_CITY_SAVE_CONFIRM_CALLBACK },
+        { text: "❌ انصراف", callback_data: ADMIN_CITIES_CALLBACK },
+      ],
+      [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+    ],
+  };
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "⚠️ <b>تأیید تغییر حساس</b>",
+      `🏙 <b>شهر:</b> ${escapeHtml(flow.city_label)}`,
+      `🔢 <b>شماره‌های منبع:</b> ${ids.map(toPersianDigits).join("، ")}`,
+      "",
+      "با تأیید، شماره‌های فعال قبلی این شهر با این فهرست جایگزین می‌شوند.",
+    ].join("\n"),
+    keyboard,
+  );
+}
+
+async function handleAdminTextFlow(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+  text: string,
+): Promise<boolean> {
+  const flow = await getAdminFlow(env.DB, telegramUserId);
+  if (!flow) return false;
+  if (text === CANCEL_BUTTON) {
+    await clearAdminFlow(env.DB, telegramUserId);
+    await sendMessage(env, chatId, "عملیات مدیریت لغو شد.", adminMenuKeyboard());
+    return true;
+  }
+  if (flow.state === "awaiting_city_label") {
+    const label = normalizePersianText(text);
+    if (label.length < 2 || label.length > 50) {
+      await sendMessage(env, chatId, "نام شهر باید بین ۲ تا ۵۰ نویسه باشد.");
+      return true;
+    }
+    const existing = await findCityByLabel(env.DB, label);
+    if (existing) {
+      await sendMessage(
+        env,
+        chatId,
+        `⚠️ شهر <b>${escapeHtml(label)}</b> از قبل ثبت شده است. برای تغییر شماره‌ها از فهرست مدیریت شهرها روی همان شهر بزنید.`,
+        adminMenuKeyboard(),
+      );
+      await clearAdminFlow(env.DB, telegramUserId);
+      return true;
+    }
+    const key = await generateCityKey(label);
+    await setAdminFlow(
+      env.DB,
+      telegramUserId,
+      chatId,
+      "choosing_source_mode",
+      key,
+      label,
+    );
+    await sendMessage(
+      env,
+      chatId,
+      "شماره‌های منبع را چگونه دریافت کنیم؟\n\nکشف خودکار در اجرای بعدی Fetch، سایت Maztozi را با مرورگر باز می‌کند و شماره‌ها را استخراج می‌کند. نتیجه قبل از فعال‌سازی برای تأیید شما ارسال می‌شود.",
+      adminSourceModeKeyboard(),
+    );
+    return true;
+  }
+  if (flow.state === "choosing_source_mode") {
+    if (text === ADMIN_AUTO_SOURCE_BUTTON) {
+      await setAdminFlow(
+        env.DB,
+        telegramUserId,
+        chatId,
+        "confirm_discovery",
+        flow.city_key,
+        flow.city_label,
+        [],
+        "auto",
+      );
+      const keyboard: InlineKeyboardMarkup = {
+        inline_keyboard: [
+          [
+            { text: "✅ ثبت درخواست کشف", callback_data: ADMIN_CITY_DISCOVERY_CONFIRM_CALLBACK },
+            { text: "❌ انصراف", callback_data: ADMIN_CITIES_CALLBACK },
+          ],
+          [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+        ],
+      };
+      await sendMessage(
+        env,
+        chatId,
+        `⚠️ درخواست کشف خودکار برای شهر <b>${escapeHtml(flow.city_label ?? "")}</b> ثبت شود؟\n\nشهر تا پیدا شدن شماره‌ها و تأیید نهایی فعال نمی‌شود.`,
+        keyboard,
+      );
+      return true;
+    }
+    if (text === ADMIN_MANUAL_SOURCE_BUTTON) {
+      await setAdminFlow(
+        env.DB,
+        telegramUserId,
+        chatId,
+        "awaiting_source_ids",
+        flow.city_key,
+        flow.city_label,
+        [],
+        "manual",
+      );
+      await sendMessage(
+        env,
+        chatId,
+        "شماره‌ها را با فاصله یا ویرگول ارسال کنید؛ مثلاً:\n<code>۲۲، ۲۳، ۲۶</code>",
+        {
+          keyboard: [[{ text: CANCEL_BUTTON }, { text: MAIN_MENU_BUTTON }]],
+          resize_keyboard: true,
+          is_persistent: true,
+        },
+      );
+      return true;
+    }
+    await sendMessage(env, chatId, "یکی از دو روش نمایش‌داده‌شده را انتخاب کنید.", adminSourceModeKeyboard());
+    return true;
+  }
+  if (flow.state === "awaiting_source_ids") {
+    const parsed = parseAdminSourceIds(text);
+    if (parsed.invalid.length > 0 || parsed.ids.length === 0) {
+      await sendMessage(
+        env,
+        chatId,
+        `⚠️ ورودی معتبر نیست.${parsed.invalid.length ? ` موارد نامعتبر: ${escapeHtml(parsed.invalid.join("، "))}` : ""}\nفقط عددهای مثبت را با فاصله یا ویرگول ارسال کنید.`,
+      );
+      return true;
+    }
+    if (parsed.ids.length > 50) {
+      await sendMessage(env, chatId, "حداکثر ۵۰ شماره برای هر شهر پذیرفته می‌شود.");
+      return true;
+    }
+    await setAdminFlow(
+      env.DB,
+      telegramUserId,
+      chatId,
+      "confirm_manual_save",
+      flow.city_key,
+      flow.city_label,
+      parsed.ids,
+      "manual",
+    );
+    if (parsed.duplicates.length > 0) {
+      await sendMessage(
+        env,
+        chatId,
+        `⚠️ شماره‌های تکراری ${parsed.duplicates.map(toPersianDigits).join("، ")} فقط یک بار در نظر گرفته شدند.`,
+      );
+    }
+    await showAdminCitySaveConfirmation(env, chatId, telegramUserId);
+    return true;
+  }
+  return true;
+}
+
+function formatTehranDateTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return value || "نامشخص";
+  }
+  return new Intl.DateTimeFormat("fa-IR", {
+    timeZone: TEHRAN_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(timestamp));
+}
+
+async function openAdminSystemStatus(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  if (!isAdmin(env, telegramUserId)) {
+    await sendMessage(env, chatId, "دسترسی مدیریت برای این حساب فعال نیست.");
+    return;
+  }
+  const [stats, statuses] = await Promise.all([
+    getAdminSystemStats(env.DB),
+    listSyncStatuses(env.DB),
+  ]);
+  const now = Date.now();
+  const staleCities = statuses.filter((status) => {
+    const fetchedAt = Date.parse(status.fetched_at);
+    return !Number.isFinite(fetchedAt) || now - fetchedAt > 8 * 60 * 60 * 1000;
+  });
+  const activeCities = statuses.filter((status) => Boolean(status.active_date));
+  const latestFetch = statuses
+    .map((status) => status.fetched_at)
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? "";
+  const cityLines = statuses.map((status) => {
+    const city = cityByKey(status.city_key);
+    const pending = status.pending_date
+      ? ` | در انتظار ${status.pending_date}`
+      : "";
+    return `• ${escapeHtml(city?.label ?? status.city_key)}: ${toPersianDigits(status.row_count)} مورد | ${escapeHtml(status.last_decision || "نامشخص")}${escapeHtml(pending)}`;
+  });
+  const keyboard: InlineKeyboardMarkup = {
+    inline_keyboard: [
+      [{ text: "🔄 تازه‌سازی وضعیت", callback_data: ADMIN_STATUS_CALLBACK }],
+      [{ text: "👥 مدیریت کاربران", callback_data: ADMIN_REFRESH_CALLBACK }],
+      [{ text: "🏙 مدیریت شهرها", callback_data: ADMIN_CITIES_CALLBACK }],
+      [{ text: "⬅️ پنل مدیریت", callback_data: ADMIN_HOME_CALLBACK }],
+      [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+    ],
+  };
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "📊 <b>وضعیت سامانه</b>",
+      "",
+      `${staleCities.length === 0 ? "🟢" : "🟠"} <b>وضعیت:</b> ${staleCities.length === 0 ? "سالم" : "نیازمند بررسی"}`,
+      `🕒 <b>آخرین Fetch:</b> ${escapeHtml(latestFetch ? formatTehranDateTime(latestFetch) : "ثبت نشده")}`,
+      `🏙 <b>شهرهای فعال:</b> ${toPersianDigits(activeCities.length)} از ${toPersianDigits(statuses.length)}`,
+      `⚡️ <b>خاموشی‌های فعال:</b> ${toPersianDigits(stats.active_outages)}`,
+      `👤 <b>کاربران مجاز:</b> ${toPersianDigits(stats.authorized_users)}`,
+      `🏠 <b>پروفایل‌های شخصی:</b> ${toPersianDigits(stats.personal_profiles)}`,
+      `🔔 <b>اعلان روزانه در ۲۴ ساعت:</b> ${toPersianDigits(stats.daily_notifications_24h)}`,
+      `🔄 <b>اعلان تغییر در ۲۴ ساعت:</b> ${toPersianDigits(stats.change_notifications_24h)}`,
+      `⏰ <b>یادآوری در ۲۴ ساعت:</b> ${toPersianDigits(stats.reminders_24h)}`,
+      `🗄 <b>رکوردهای آرشیو:</b> ${toPersianDigits(stats.archived_outages)}`,
+      `🔢 <b>مشاهدات شماره خاموشی:</b> ${toPersianDigits(stats.outage_number_observations)}`,
+      staleCities.length > 0
+        ? `⚠️ <b>شهرهای بدون Fetch تازه:</b> ${staleCities.map((status) => escapeHtml(cityByKey(status.city_key)?.label ?? status.city_key)).join("، ")}`
+        : "✅ همه شهرها در بازه مورد انتظار به‌روز شده‌اند.",
+      "",
+      "<b>جزئیات شهرها:</b>",
+      ...cityLines,
+      "",
+      "اندازه دقیق فایل D1 از داخل Worker قابل خواندن نیست؛ برای آن از wrangler d1 info استفاده کنید.",
+    ].join("\n"),
+    keyboard,
+  );
 }
 
 async function handlePersonalizationFlow(
@@ -739,10 +1707,9 @@ async function handlePersonalizationFlow(
 ): Promise<boolean> {
   const chatId = String(message.chat.id);
   const telegramUserId = String(telegramUser.id);
-
   if (text === CANCEL_BUTTON) {
     await clearPersonalizationFlow(env.DB, telegramUserId);
-    await sendMessage(env, chatId, "عملیات لغو شد.", mainMenuKeyboard());
+    await sendMessage(env, chatId, "عملیات لغو شد.", mainMenuFor(env, telegramUserId));
     return true;
   }
 
@@ -755,18 +1722,18 @@ async function handlePersonalizationFlow(
         env,
         chatId,
         `ورود موقتاً قفل است. حدود ${toPersianDigits(lockMinutes)} دقیقه دیگر دوباره امتحان کنید.`,
-        mainMenuKeyboard(),
+        mainMenuFor(env, telegramUserId),
       );
       return true;
     }
-
     const expectedPassword = env.PERSONALIZATION_PASSWORD?.trim() ?? "";
     if (expectedPassword && secureTextEquals(text, expectedPassword)) {
       await authorizeTelegramUser(env.DB, telegramUserId);
-      await beginPersonalizationSetup(env, chatId, telegramUserId);
+      await clearPersonalizationFlow(env.DB, telegramUserId);
+      await sendMessage(env, chatId, "دسترسی «خاموشی من» فعال شد.");
+      await showPersonalDashboard(env, chatId, telegramUserId);
       return true;
     }
-
     const failure = await recordPasswordFailure(env.DB, telegramUserId);
     if (failure.lockedUntil) {
       await clearPersonalizationFlow(env.DB, telegramUserId);
@@ -774,11 +1741,10 @@ async function handlePersonalizationFlow(
         env,
         chatId,
         `رمز نادرست بود. پس از ${toPersianDigits(PASSWORD_WINDOW_MINUTES)} دقیقه می‌توانید دوباره تلاش کنید.`,
-        mainMenuKeyboard(),
+        mainMenuFor(env, telegramUserId),
       );
       return true;
     }
-
     const remaining = Math.max(0, 5 - failure.attempts);
     await sendMessage(
       env,
@@ -790,6 +1756,32 @@ async function handlePersonalizationFlow(
 
   const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
   if (!authorized) {
+    return true;
+  }
+
+  if (flow.state === PERSONALIZATION_FLOW_LABEL) {
+    const label = normalizePersianText(text);
+    if (label.length < 2 || label.length > 30) {
+      await sendMessage(env, chatId, "نام تنظیم باید بین ۲ تا ۳۰ نویسه باشد.");
+      return true;
+    }
+    await setPersonalizationFlow(
+      env.DB,
+      telegramUserId,
+      chatId,
+      PERSONALIZATION_FLOW_CITY,
+      flow.city_key,
+      flow.match_mode,
+      flow.profile_id,
+      label,
+      flow.match_value,
+    );
+    await sendMessage(
+      env,
+      chatId,
+      "شهر مربوط به این تنظیم را انتخاب کنید:",
+      personalizationCityKeyboard(),
+    );
     return true;
   }
 
@@ -810,7 +1802,10 @@ async function handlePersonalizationFlow(
       chatId,
       PERSONALIZATION_FLOW_MODE,
       city.key,
-      null,
+      flow.match_mode,
+      flow.profile_id,
+      flow.profile_label,
+      flow.match_value,
     );
     await sendMessage(
       env,
@@ -828,7 +1823,6 @@ async function handlePersonalizationFlow(
     } else if (text === PERSONAL_ADDRESS_MODE_BUTTON) {
       mode = "address_keyword";
     }
-
     if (!mode || !flow.city_key) {
       await sendMessage(
         env,
@@ -838,7 +1832,6 @@ async function handlePersonalizationFlow(
       );
       return true;
     }
-
     await setPersonalizationFlow(
       env.DB,
       telegramUserId,
@@ -846,6 +1839,9 @@ async function handlePersonalizationFlow(
       PERSONALIZATION_FLOW_VALUE,
       flow.city_key,
       mode,
+      flow.profile_id,
+      flow.profile_label,
+      flow.match_value,
     );
     await sendMessage(
       env,
@@ -858,17 +1854,21 @@ async function handlePersonalizationFlow(
   }
 
   if (flow.state === PERSONALIZATION_FLOW_VALUE) {
-    if (!flow.city_key || !flow.match_mode || !cityByKey(flow.city_key)) {
+    if (
+      !flow.city_key ||
+      !flow.match_mode ||
+      !flow.profile_label ||
+      !cityByKey(flow.city_key)
+    ) {
       await clearPersonalizationFlow(env.DB, telegramUserId);
       await sendMessage(
         env,
         chatId,
         "اطلاعات این مرحله ناقص بود. دوباره «خاموشی من» را انتخاب کنید.",
-        mainMenuKeyboard(),
+        mainMenuFor(env, telegramUserId),
       );
       return true;
     }
-
     let matchValue = "";
     if (flow.match_mode === "outage_number") {
       matchValue = normalizeOutageNumber(text);
@@ -891,47 +1891,507 @@ async function handlePersonalizationFlow(
         return true;
       }
     }
-
-    await savePersonalOutageProfile(
+    await setPersonalizationFlow(
       env.DB,
       telegramUserId,
+      chatId,
+      PERSONALIZATION_FLOW_REMINDER,
       flow.city_key,
       flow.match_mode,
+      flow.profile_id,
+      flow.profile_label,
       matchValue,
     );
-    await clearPersonalizationFlow(env.DB, telegramUserId);
-    const profile = await getPersonalOutageProfile(env.DB, telegramUserId);
-    if (!profile) {
-      throw new Error("Personal outage profile was not saved.");
-    }
-    await sendMessage(env, chatId, "تنظیم «خاموشی من» ذخیره شد.");
-    await showPersonalOutage(env, chatId, profile);
+    const currentProfile = flow.profile_id
+      ? await getPersonalOutageProfile(env.DB, telegramUserId, flow.profile_id)
+      : null;
+    await sendMessage(
+      env,
+      chatId,
+      currentProfile
+        ? `زمان یادآوری را انتخاب کنید. تنظیم فعلی: <b>${escapeHtml(reminderLabel(currentProfile.reminder_minutes))}</b>`
+        : "زمان یادآوری قبل از شروع خاموشی را انتخاب کنید:",
+      personalizationReminderKeyboard(),
+    );
     return true;
   }
 
-  if (flow.state === PERSONALIZATION_FLOW_DELETE) {
-    if (text !== CONFIRM_DELETE_BUTTON) {
+  if (flow.state === PERSONALIZATION_FLOW_REMINDER) {
+    const reminderMinutes = reminderMinutesFromButton(text);
+    if (
+      reminderMinutes === null ||
+      !flow.city_key ||
+      !flow.match_mode ||
+      !flow.profile_label ||
+      !flow.match_value ||
+      !cityByKey(flow.city_key)
+    ) {
       await sendMessage(
         env,
         chatId,
-        "برای حذف، دکمه تأیید را بزنید یا انصراف دهید.",
-        deleteConfirmationKeyboard(),
+        "یکی از زمان‌های یادآوری نمایش‌داده‌شده را انتخاب کنید.",
+        personalizationReminderKeyboard(),
       );
       return true;
     }
-    await deletePersonalOutageProfile(env.DB, telegramUserId);
+    let saved: PersonalOutageProfile;
+    try {
+      saved = await savePersonalOutageProfile(
+        env.DB,
+        telegramUserId,
+        flow.profile_id,
+        flow.profile_label,
+        flow.city_key,
+        flow.match_mode,
+        flow.match_value,
+        reminderMinutes,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.includes("Duplicate")) {
+        await sendMessage(
+          env,
+          chatId,
+          "این شهر و مقدار قبلاً در یکی از تنظیم‌های «خاموشی من» ذخیره شده است. عملیات را دوباره آغاز کنید.",
+        );
+        await clearPersonalizationFlow(env.DB, telegramUserId);
+        await showPersonalDashboard(env, chatId, telegramUserId);
+        return true;
+      }
+      if (message.includes("at most three")) {
+        await clearPersonalizationFlow(env.DB, telegramUserId);
+        await sendMessage(env, chatId, "حداکثر ۳ تنظیم قابل ذخیره است.");
+        await showPersonalDashboard(env, chatId, telegramUserId);
+        return true;
+      }
+      throw error;
+    }
     await clearPersonalizationFlow(env.DB, telegramUserId);
     await sendMessage(
       env,
       chatId,
-      "تنظیم «خاموشی من» حذف شد.",
-      mainMenuKeyboard(),
+      `تنظیم <b>${escapeHtml(saved.profile_label)}</b> با یادآوری <b>${escapeHtml(reminderLabel(saved.reminder_minutes))}</b> ذخیره شد.`,
+      mainMenuFor(env, telegramUserId),
     );
+    await showPersonalProfile(env, chatId, saved);
     return true;
   }
 
   await clearPersonalizationFlow(env.DB, telegramUserId);
   return false;
+}
+
+async function handleShowNewCallback(
+  env: Env,
+  callbackQuery: TelegramCallbackQuery,
+  chatId: string,
+  data: string,
+): Promise<boolean> {
+  if (!data.startsWith(SHOW_NEW_OUTAGES_PREFIX)) {
+    return false;
+  }
+  const batchId = data.slice(SHOW_NEW_OUTAGES_PREFIX.length);
+  const batch = await getNotificationBatch(env.DB, batchId);
+  if (!batch || batch.chatId !== chatId) {
+    await answerCallbackQuery(
+      env,
+      callbackQuery.id,
+      "جزئیات این اعلان دیگر در دسترس نیست.",
+      true,
+    );
+    return true;
+  }
+  const city = cityByKey(batch.cityKey);
+  if (!city || batch.rows.length === 0) {
+    await answerCallbackQuery(
+      env,
+      callbackQuery.id,
+      "اطلاعات این اعلان کامل نیست.",
+      true,
+    );
+    return true;
+  }
+  await answerCallbackQuery(env, callbackQuery.id, "در حال نمایش جزئیات…");
+  await setChatSession(env.DB, chatId, city.key, false);
+  await sendOutageResults(
+    env,
+    chatId,
+    city.label,
+    batch.rows,
+    `⚡️ <b>خاموشی‌های جدید ${escapeHtml(city.label)}</b>`,
+    cityActionKeyboard(),
+  );
+  return true;
+}
+
+async function handleCallbackQuery(
+  env: Env,
+  callbackQuery: TelegramCallbackQuery,
+): Promise<void> {
+  const data = callbackQuery.data?.trim() ?? "";
+  const message = callbackQuery.message;
+  const telegramUser = callbackQuery.from;
+  const chatId = message ? String(message.chat.id) : null;
+  const telegramUserId = telegramUser ? String(telegramUser.id) : null;
+  if (!chatId) {
+    await answerCallbackQuery(env, callbackQuery.id, "این دکمه قابل استفاده نیست.", true);
+    return;
+  }
+  if (telegramUser) {
+    await upsertTelegramUser(env.DB, telegramUser, chatId);
+  }
+  if (await handleShowNewCallback(env, callbackQuery, chatId, data)) {
+    return;
+  }
+
+  if (data === MAIN_MENU_CALLBACK) {
+    if (telegramUserId) {
+      await clearAdminFlow(env.DB, telegramUserId);
+      await clearPersonalizationFlow(env.DB, telegramUserId);
+    }
+    await answerCallbackQuery(env, callbackQuery.id, "منوی اصلی");
+    await sendMessage(
+      env,
+      chatId,
+      "یک گزینه را انتخاب کنید:",
+      mainMenuFor(env, telegramUserId),
+    );
+    return;
+  }
+
+  const adminAction =
+    data === ADMIN_HOME_CALLBACK ||
+    data === ADMIN_REFRESH_CALLBACK ||
+    data === ADMIN_STATUS_CALLBACK ||
+    data === ADMIN_CITIES_CALLBACK ||
+    data === ADMIN_CITY_ADD_CALLBACK ||
+    data === ADMIN_CITY_SAVE_CONFIRM_CALLBACK ||
+    data === ADMIN_CITY_DISCOVERY_CONFIRM_CALLBACK ||
+    data.startsWith(ADMIN_REVOKE_PREFIX) ||
+    data.startsWith(ADMIN_REVOKE_CONFIRM_PREFIX) ||
+    data.startsWith(ADMIN_CITY_EDIT_PREFIX) ||
+    data.startsWith(ADMIN_CITY_DISABLE_PREFIX) ||
+    data.startsWith(ADMIN_CITY_DISABLE_CONFIRM_PREFIX) ||
+    data.startsWith(ADMIN_CITY_ACCEPT_PREFIX) ||
+    data.startsWith(ADMIN_CITY_REJECT_PREFIX);
+
+  if (adminAction) {
+    if (
+      !telegramUser ||
+      !telegramUserId ||
+      !message ||
+      !isAdmin(env, telegramUserId) ||
+      !isPrivateConversation(message, telegramUser)
+    ) {
+      await answerCallbackQuery(
+        env,
+        callbackQuery.id,
+        "این بخش فقط برای مدیر و در گفت‌وگوی خصوصی فعال است.",
+        true,
+      );
+      return;
+    }
+
+    if (data === ADMIN_HOME_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "پنل مدیریت");
+      await openAdminHome(env, chatId, telegramUserId);
+      return;
+    }
+    if (data === ADMIN_STATUS_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "وضعیت به‌روز شد.");
+      await openAdminSystemStatus(env, chatId, telegramUserId);
+      return;
+    }
+    if (data === ADMIN_REFRESH_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "فهرست به‌روز شد.");
+      await openAdminUsers(env, chatId, telegramUserId);
+      return;
+    }
+    if (data === ADMIN_CITIES_CALLBACK) {
+      await clearAdminFlow(env.DB, telegramUserId);
+      await answerCallbackQuery(env, callbackQuery.id, "فهرست شهرها");
+      await openAdminCities(env, chatId, telegramUserId);
+      return;
+    }
+    if (data === ADMIN_CITY_ADD_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "افزودن شهر");
+      await beginAdminAddCity(env, chatId, telegramUserId);
+      return;
+    }
+    if (data.startsWith(ADMIN_REVOKE_CONFIRM_PREFIX)) {
+      const targetId = data.slice(ADMIN_REVOKE_CONFIRM_PREFIX.length);
+      if (!/^\d+$/.test(targetId)) {
+        await answerCallbackQuery(env, callbackQuery.id, "شناسه کاربر نامعتبر است.", true);
+        return;
+      }
+      await revokeTelegramUser(env.DB, targetId);
+      await answerCallbackQuery(env, callbackQuery.id, "دسترسی کاربر لغو شد.");
+      await openAdminUsers(env, chatId, telegramUserId);
+      return;
+    }
+    if (data.startsWith(ADMIN_REVOKE_PREFIX)) {
+      const targetId = data.slice(ADMIN_REVOKE_PREFIX.length);
+      if (!/^\d+$/.test(targetId)) {
+        await answerCallbackQuery(env, callbackQuery.id, "شناسه کاربر نامعتبر است.", true);
+        return;
+      }
+      await answerCallbackQuery(env, callbackQuery.id);
+      await sendMessage(
+        env,
+        chatId,
+        `⚠️ <b>تأیید تغییر حساس</b>\n\nدسترسی کاربر <code>${escapeHtml(targetId)}</code> لغو شود؟ پروفایل‌های او حذف نمی‌شوند ولی تا تأیید مجدد رمز قابل استفاده نخواهند بود.`,
+        {
+          inline_keyboard: [
+            [
+              { text: "✅ بله، لغو شود", callback_data: `${ADMIN_REVOKE_CONFIRM_PREFIX}${targetId}` },
+              { text: "❌ انصراف", callback_data: ADMIN_REFRESH_CALLBACK },
+            ],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
+      );
+      return;
+    }
+    if (data.startsWith(ADMIN_CITY_EDIT_PREFIX)) {
+      const cityKey = data.slice(ADMIN_CITY_EDIT_PREFIX.length);
+      const city = await getManagedCity(env.DB, cityKey);
+      if (!city) {
+        await answerCallbackQuery(env, callbackQuery.id, "شهر پیدا نشد.", true);
+        return;
+      }
+      await setAdminFlow(
+        env.DB,
+        telegramUserId,
+        chatId,
+        "awaiting_source_ids",
+        city.key,
+        city.label,
+        city.source_city_ids,
+        "manual",
+      );
+      await answerCallbackQuery(env, callbackQuery.id, "ویرایش شماره‌ها");
+      await sendMessage(
+        env,
+        chatId,
+        [
+          `شماره‌های منبع شهر <b>${escapeHtml(city.label)}</b> را کامل ارسال کنید.`,
+          `فهرست فعلی: ${city.source_city_ids.map(toPersianDigits).join("، ") || "خالی"}`,
+          "",
+          "بعد از ارسال، خلاصه و هشدارها نمایش داده می‌شود و برای ذخیره تأیید جداگانه می‌گیریم.",
+        ].join("\n"),
+        {
+          keyboard: [[{ text: CANCEL_BUTTON }, { text: MAIN_MENU_BUTTON }]],
+          resize_keyboard: true,
+          is_persistent: true,
+        },
+      );
+      return;
+    }
+    if (data.startsWith(ADMIN_CITY_DISABLE_CONFIRM_PREFIX)) {
+      const cityKey = data.slice(ADMIN_CITY_DISABLE_CONFIRM_PREFIX.length);
+      await deactivateManagedCity(env.DB, cityKey);
+      await answerCallbackQuery(env, callbackQuery.id, "شهر غیرفعال شد.");
+      await openAdminCities(env, chatId, telegramUserId);
+      return;
+    }
+    if (data.startsWith(ADMIN_CITY_DISABLE_PREFIX)) {
+      const cityKey = data.slice(ADMIN_CITY_DISABLE_PREFIX.length);
+      const city = await getManagedCity(env.DB, cityKey);
+      if (!city) {
+        await answerCallbackQuery(env, callbackQuery.id, "شهر پیدا نشد.", true);
+        return;
+      }
+      if (city.is_active !== 1) {
+        await answerCallbackQuery(env, callbackQuery.id, "این شهر اکنون فعال نیست.", true);
+        return;
+      }
+      await answerCallbackQuery(env, callbackQuery.id);
+      await sendMessage(
+        env,
+        chatId,
+        [
+          "⚠️ <b>تأیید تغییر حساس</b>",
+          `شهر <b>${escapeHtml(city.label)}</b> غیرفعال شود؟`,
+          "",
+          "شهر از منوی کاربران و Fetchهای بعدی حذف می‌شود؛ داده‌های قبلی و پروفایل کاربران پاک نمی‌شوند.",
+        ].join("\n"),
+        {
+          inline_keyboard: [
+            [
+              { text: "✅ بله، غیرفعال شود", callback_data: `${ADMIN_CITY_DISABLE_CONFIRM_PREFIX}${city.key}` },
+              { text: "❌ انصراف", callback_data: ADMIN_CITIES_CALLBACK },
+            ],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
+      );
+      return;
+    }
+    if (data === ADMIN_CITY_SAVE_CONFIRM_CALLBACK) {
+      const flow = await getAdminFlow(env.DB, telegramUserId);
+      if (!flow?.city_key || !flow.city_label) {
+        await answerCallbackQuery(env, callbackQuery.id, "اطلاعات عملیات منقضی شده است.", true);
+        return;
+      }
+      const ids = adminFlowSourceIds(flow);
+      const conflicts = await findSourceConflicts(env.DB, ids, flow.city_key);
+      if (conflicts.length > 0) {
+        await answerCallbackQuery(env, callbackQuery.id, "شماره تکراری با شهر دیگر وجود دارد.", true);
+        await showAdminCitySaveConfirmation(env, chatId, telegramUserId);
+        return;
+      }
+      await saveManagedCity(env.DB, flow.city_key, flow.city_label, ids);
+      await clearAdminFlow(env.DB, telegramUserId);
+      await answerCallbackQuery(env, callbackQuery.id, "شهر ذخیره و فعال شد.");
+      await sendMessage(env, chatId, "✅ شهر با موفقیت ذخیره شد.", adminMenuKeyboard());
+      await openAdminCities(env, chatId, telegramUserId);
+      return;
+    }
+    if (data === ADMIN_CITY_DISCOVERY_CONFIRM_CALLBACK) {
+      const flow = await getAdminFlow(env.DB, telegramUserId);
+      if (!flow?.city_key || !flow.city_label) {
+        await answerCallbackQuery(env, callbackQuery.id, "اطلاعات عملیات منقضی شده است.", true);
+        return;
+      }
+      await requestCityDiscovery(env.DB, flow.city_key, flow.city_label);
+      await clearAdminFlow(env.DB, telegramUserId);
+      await answerCallbackQuery(env, callbackQuery.id, "درخواست کشف ثبت شد.");
+      await sendMessage(
+        env,
+        chatId,
+        "✅ درخواست ثبت شد. در اجرای بعدی Fetch، مرورگر خودکار شماره‌های Maztozi را استخراج می‌کند. نتیجه برای تأیید نهایی به همین چت ارسال می‌شود.",
+        adminMenuKeyboard(),
+      );
+      return;
+    }
+    if (data.startsWith(ADMIN_CITY_ACCEPT_PREFIX)) {
+      const proposalId = data.slice(ADMIN_CITY_ACCEPT_PREFIX.length);
+      const proposal = await getCitySourceProposal(env.DB, proposalId);
+      if (!proposal) {
+        await answerCallbackQuery(env, callbackQuery.id, "پیشنهاد پیدا نشد.", true);
+        return;
+      }
+      try {
+        const city = await acceptCitySourceProposal(env.DB, proposalId);
+        await answerCallbackQuery(env, callbackQuery.id, "شهر فعال شد.");
+        await sendMessage(
+          env,
+          chatId,
+          `✅ شهر <b>${escapeHtml(city.label)}</b> با ${toPersianDigits(city.source_city_ids.length)} شماره منبع فعال شد.`,
+          adminMenuKeyboard(),
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "خطای نامشخص";
+        await answerCallbackQuery(env, callbackQuery.id, "فعال‌سازی انجام نشد.", true);
+        await sendMessage(
+          env,
+          chatId,
+          `⚠️ فعال‌سازی انجام نشد: ${escapeHtml(detail)}\nاحتمالاً یکی از شماره‌ها قبلاً برای شهر دیگری فعال است.`,
+          adminMenuKeyboard(),
+        );
+      }
+      return;
+    }
+    if (data.startsWith(ADMIN_CITY_REJECT_PREFIX)) {
+      const proposalId = data.slice(ADMIN_CITY_REJECT_PREFIX.length);
+      await rejectCitySourceProposal(env.DB, proposalId);
+      await answerCallbackQuery(env, callbackQuery.id, "پیشنهاد رد شد.");
+      await openAdminCities(env, chatId, telegramUserId);
+      return;
+    }
+  }
+
+  if (!telegramUser || !telegramUserId || !message) {
+    await answerCallbackQuery(env, callbackQuery.id, "اطلاعات کاربر کامل نیست.", true);
+    return;
+  }
+  if (!isPrivateConversation(message, telegramUser)) {
+    await answerCallbackQuery(env, callbackQuery.id, "این بخش فقط در گفت‌وگوی خصوصی فعال است.", true);
+    return;
+  }
+  const personalAction =
+    data === PERSONAL_ADD_CALLBACK ||
+    data === PERSONAL_DASHBOARD_CALLBACK ||
+    data.startsWith(PERSONAL_SHOW_PREFIX) ||
+    data.startsWith(PERSONAL_EDIT_PREFIX) ||
+    data.startsWith(PERSONAL_DELETE_PREFIX) ||
+    data.startsWith(PERSONAL_DELETE_CONFIRM_PREFIX);
+  if (!personalAction) {
+    await answerCallbackQuery(env, callbackQuery.id, "این دکمه قابل استفاده نیست.", true);
+    return;
+  }
+  const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
+  if (!authorized) {
+    await answerCallbackQuery(env, callbackQuery.id);
+    return;
+  }
+
+  if (data === PERSONAL_DASHBOARD_CALLBACK) {
+    await answerCallbackQuery(env, callbackQuery.id, "در حال به‌روزرسانی…");
+    await showPersonalDashboard(env, chatId, telegramUserId);
+    return;
+  }
+  if (data === PERSONAL_ADD_CALLBACK) {
+    await answerCallbackQuery(env, callbackQuery.id, "افزودن تنظیم جدید");
+    await beginPersonalizationSetup(env, chatId, telegramUserId);
+    return;
+  }
+
+  const prefixes = [
+    PERSONAL_SHOW_PREFIX,
+    PERSONAL_EDIT_PREFIX,
+    PERSONAL_DELETE_CONFIRM_PREFIX,
+    PERSONAL_DELETE_PREFIX,
+  ];
+  const prefix = prefixes.find((candidate) => data.startsWith(candidate));
+  const profileId = prefix ? data.slice(prefix.length) : "";
+  if (!prefix || !/^[a-f0-9]{32}$/i.test(profileId)) {
+    await answerCallbackQuery(env, callbackQuery.id, "شناسه تنظیم نامعتبر است.", true);
+    return;
+  }
+  const profile = await getPersonalOutageProfile(env.DB, telegramUserId, profileId);
+  if (!profile) {
+    await answerCallbackQuery(env, callbackQuery.id, "این تنظیم دیگر وجود ندارد.", true);
+    await showPersonalDashboard(env, chatId, telegramUserId);
+    return;
+  }
+
+  if (prefix === PERSONAL_SHOW_PREFIX) {
+    await answerCallbackQuery(env, callbackQuery.id, "در حال نمایش…");
+    await showPersonalProfile(env, chatId, profile);
+    return;
+  }
+  if (prefix === PERSONAL_EDIT_PREFIX) {
+    await answerCallbackQuery(env, callbackQuery.id, "ویرایش تنظیم");
+    await beginPersonalizationSetup(env, chatId, telegramUserId, profileId);
+    return;
+  }
+  if (prefix === PERSONAL_DELETE_PREFIX) {
+    await answerCallbackQuery(env, callbackQuery.id);
+    const keyboard: InlineKeyboardMarkup = {
+      inline_keyboard: [
+        [
+          {
+            text: "بله، حذف شود",
+            callback_data: `${PERSONAL_DELETE_CONFIRM_PREFIX}${profileId}`,
+          },
+          { text: "انصراف", callback_data: PERSONAL_DASHBOARD_CALLBACK },
+        ],
+        [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+      ],
+    };
+    await sendMessage(
+      env,
+      chatId,
+      `تنظیم <b>${escapeHtml(profile.profile_label)}</b> حذف شود؟`,
+      keyboard,
+    );
+    return;
+  }
+
+  await deletePersonalOutageProfile(env.DB, telegramUserId, profileId);
+  await answerCallbackQuery(env, callbackQuery.id, "تنظیم حذف شد.");
+  await showPersonalDashboard(env, chatId, telegramUserId);
 }
 
 async function handleTextMessage(
@@ -942,7 +2402,6 @@ async function handleTextMessage(
   const chatId = String(message.chat.id);
   const telegramUser = message.from;
   const telegramUserId = telegramUser ? String(telegramUser.id) : null;
-
   if (telegramUser) {
     await upsertTelegramUser(env.DB, telegramUser, chatId);
   }
@@ -951,14 +2410,37 @@ async function handleTextMessage(
     await setChatSession(env.DB, chatId, null, false);
     if (telegramUserId) {
       await clearPersonalizationFlow(env.DB, telegramUserId);
+      await clearAdminFlow(env.DB, telegramUserId);
     }
     await sendMessage(
       env,
       chatId,
       "یک گزینه را انتخاب کنید:",
-      mainMenuKeyboard(),
+      mainMenuFor(env, telegramUserId),
     );
     return;
+  }
+
+  if (text === "/id") {
+    await sendMessage(
+      env,
+      chatId,
+      telegramUserId
+        ? `شناسه عددی تلگرام شما: <code>${escapeHtml(telegramUserId)}</code>`
+        : "شناسه کاربر در دسترس نیست.",
+      mainMenuFor(env, telegramUserId),
+    );
+    return;
+  }
+
+  if (telegramUser && telegramUserId && isAdmin(env, telegramUserId)) {
+    const handled = await handleAdminTextFlow(
+      env,
+      chatId,
+      telegramUserId,
+      text,
+    );
+    if (handled) return;
   }
 
   if (telegramUser && telegramUserId) {
@@ -971,10 +2453,32 @@ async function handleTextMessage(
         text,
         flow,
       );
-      if (handled) {
-        return;
-      }
+      if (handled) return;
     }
+  }
+
+  if (text === ADMIN_PANEL_BUTTON || text === "/admin") {
+    if (!telegramUserId) return;
+    await openAdminHome(env, chatId, telegramUserId);
+    return;
+  }
+
+  if (text === ADMIN_STATUS_BUTTON) {
+    if (!telegramUserId) return;
+    await openAdminSystemStatus(env, chatId, telegramUserId);
+    return;
+  }
+
+  if (text === ADMIN_USERS_BUTTON) {
+    if (!telegramUserId) return;
+    await openAdminUsers(env, chatId, telegramUserId);
+    return;
+  }
+
+  if (text === ADMIN_CITIES_BUTTON) {
+    if (!telegramUserId) return;
+    await openAdminCities(env, chatId, telegramUserId);
+    return;
   }
 
   if (text === PERSONAL_OUTAGE_BUTTON) {
@@ -983,57 +2487,11 @@ async function handleTextMessage(
         env,
         chatId,
         "شناسه کاربر تلگرام در این پیام در دسترس نیست.",
-        mainMenuKeyboard(),
+        mainMenuFor(env, telegramUserId),
       );
       return;
     }
     await openPersonalOutage(env, message, telegramUser);
-    return;
-  }
-
-  if (text === EDIT_PERSONAL_OUTAGE_BUTTON) {
-    if (!telegramUserId) {
-      return;
-    }
-    const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
-    if (authorized) {
-      await beginPersonalizationSetup(env, chatId, telegramUserId);
-    }
-    return;
-  }
-
-  if (text === DELETE_PERSONAL_OUTAGE_BUTTON) {
-    if (!telegramUserId) {
-      return;
-    }
-    const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
-    if (!authorized) {
-      return;
-    }
-    const profile = await getPersonalOutageProfile(env.DB, telegramUserId);
-    if (!profile) {
-      await sendMessage(
-        env,
-        chatId,
-        "تنظیمی برای حذف وجود ندارد.",
-        mainMenuKeyboard(),
-      );
-      return;
-    }
-    await setPersonalizationFlow(
-      env.DB,
-      telegramUserId,
-      chatId,
-      PERSONALIZATION_FLOW_DELETE,
-      profile.city_key,
-      profile.match_mode,
-    );
-    await sendMessage(
-      env,
-      chatId,
-      "تنظیم «خاموشی من» حذف شود؟",
-      deleteConfirmationKeyboard(),
-    );
     return;
   }
 
@@ -1062,18 +2520,11 @@ async function handleTextMessage(
 
   const session = await getChatSession(env.DB, chatId);
   const selectedCity = cityByKey(session?.selected_city);
-
   if (text === SHOW_ALL_BUTTON) {
     if (!selectedCity) {
-      await sendMessage(
-        env,
-        chatId,
-        "ابتدا یک شهر را انتخاب کنید.",
-        cityMenuKeyboard(),
-      );
+      await sendMessage(env, chatId, "ابتدا یک شهر را انتخاب کنید.", cityMenuKeyboard());
       return;
     }
-
     const rows = await listCityOutages(env.DB, selectedCity.key);
     if (rows.length === 0) {
       await sendMessage(
@@ -1084,7 +2535,6 @@ async function handleTextMessage(
       );
       return;
     }
-
     await sendOutageResults(
       env,
       chatId,
@@ -1098,15 +2548,9 @@ async function handleTextMessage(
 
   if (text === SEARCH_BUTTON) {
     if (!selectedCity) {
-      await sendMessage(
-        env,
-        chatId,
-        "ابتدا یک شهر را انتخاب کنید.",
-        cityMenuKeyboard(),
-      );
+      await sendMessage(env, chatId, "ابتدا یک شهر را انتخاب کنید.", cityMenuKeyboard());
       return;
     }
-
     await setChatSession(env.DB, chatId, selectedCity.key, true);
     await sendMessage(
       env,
@@ -1124,7 +2568,6 @@ async function handleTextMessage(
       selectedCity.key,
       normalizedSearch,
     );
-
     if (matches.length === 0) {
       await sendMessage(
         env,
@@ -1134,7 +2577,6 @@ async function handleTextMessage(
       );
       return;
     }
-
     await sendOutageResults(
       env,
       chatId,
@@ -1160,7 +2602,7 @@ async function handleTextMessage(
     env,
     chatId,
     "برای شروع، یکی از گزینه‌های منوی اصلی را انتخاب کنید.",
-    mainMenuKeyboard(),
+    mainMenuFor(env, telegramUserId),
   );
 }
 
@@ -1171,28 +2613,23 @@ export async function handleTelegramUpdate(
   if (!Number.isInteger(update.update_id)) {
     throw new Error("Telegram update_id is missing or invalid.");
   }
-
   const claimed = await claimUpdate(env.DB, update.update_id);
   if (!claimed) {
     return;
   }
-
   try {
     if (update.callback_query) {
       await handleCallbackQuery(env, update.callback_query);
       return;
     }
-
     const message = update.message;
     if (!message) {
       return;
     }
-
     const text = message.text?.trim();
     if (!text) {
       return;
     }
-
     await handleTextMessage(env, message, text);
   } catch (error) {
     await releaseUpdate(env.DB, update.update_id);

@@ -22,6 +22,62 @@ import requests
 from khamooshi_config import CITIES, OUTAGES_API_URL
 
 
+def maybe_run_pending_discovery() -> None:
+    if os.environ.get("AUTO_DISCOVER_MAZTOZI_SOURCES", "1").strip() in {"0", "false", "False"}:
+        return
+    try:
+        from discover_maztozi_sources import run_pending_discoveries
+        run_pending_discoveries()
+    except Exception as exc:
+        # Discovery is optional and must never stop the normal six-hour fetch.
+        print(f"Maztozi source discovery warning: {exc}", file=sys.stderr)
+
+
+def fetch_dynamic_cities() -> list[dict[str, Any]]:
+    sync_url = required_env("WORKER_SYNC_URL").rstrip("/")
+    base_url = sync_url[:-5] if sync_url.endswith("/sync") else sync_url
+    headers = {"Authorization": f"Bearer {required_env('WORKER_SYNC_SECRET')}"}
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        response = session.get(
+            f"{base_url}/fetch-config",
+            headers=headers,
+            timeout=SYNC_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        body = response.json()
+        cities = body.get("cities") if isinstance(body, dict) else None
+        if not isinstance(cities, list) or not cities:
+            raise RuntimeError("Worker returned no active city configuration.")
+        normalized: list[dict[str, Any]] = []
+        for city in cities:
+            if not isinstance(city, dict):
+                continue
+            ids = city.get("source_city_ids")
+            if not isinstance(ids, list):
+                continue
+            source_ids = sorted({int(value) for value in ids if str(value).isdigit() and int(value) > 0})
+            key = str(city.get("key", "")).strip()
+            label = str(city.get("label", "")).strip()
+            if key and label and source_ids:
+                normalized.append({
+                    "key": key,
+                    "label": label,
+                    "source_city_ids": source_ids,
+                    "pgds": str(city.get("pgds", "")),
+                })
+        if not normalized:
+            raise RuntimeError("Worker city configuration contained no usable city.")
+        return normalized
+    except Exception as exc:
+        print(
+            f"Dynamic city configuration warning: {exc}. Using local fallback.",
+            file=sys.stderr,
+        )
+        return CITIES
+
+
 IRAN_TZ = ZoneInfo("Asia/Tehran")
 
 FETCH_TIMEOUT_SECONDS = 30
@@ -92,12 +148,25 @@ def required_env(name: str) -> str:
 
 
 def clean_text(value: object) -> str:
-    """Normalize Persian characters, digits, dashes, and whitespace."""
+    """Normalize Persian text, separators, letter/number spacing, and whitespace."""
     if value is None:
         return ""
+
     text = str(value).translate(PERSIAN_TEXT_TRANSLATION)
-    text = re.sub(r"\s*[-‐‑‒–—−]+\s*", " - ", text)
-    return " ".join(text.split())
+    text = text.replace("ـ", "")
+
+    # Every underscore/dash variant (including repeated forms such as __ and --)
+    # becomes exactly one plain hyphen with one space on each side.
+    text = re.sub(r"\s*(?:[_\-‐‑‒–—−]+\s*)+\s*", " - ", text)
+
+    # Separate Persian/Latin letters from Persian digits in both directions.
+    text = re.sub(r"(?<=[^\W\d_])(?=[۰-۹])", " ", text)
+    text = re.sub(r"(?<=[۰-۹])(?=[^\W\d_])", " ", text)
+
+    # Collapse all ordinary whitespace, then re-assert the exact separator form.
+    text = " ".join(text.split())
+    text = re.sub(r"\s*(?:[_\-‐‑‒–—−]+\s*)+\s*", " - ", text)
+    return text.strip()
 
 
 def clean_identifier(value: object) -> str:
@@ -424,6 +493,9 @@ def main() -> None:
 
     print(f"Fetching Jalali date: {jalali_date}")
 
+    maybe_run_pending_discovery()
+    cities = fetch_dynamic_cities()
+
     session = requests.Session()
 
     # Do not inherit VPN/proxy environment variables when accessing the
@@ -432,7 +504,7 @@ def main() -> None:
 
     city_snapshots: list[dict[str, Any]] = []
 
-    for city in CITIES:
+    for city in cities:
         rows, observations, snapshot_date = fetch_city(
             session,
             city,
