@@ -1,5 +1,7 @@
 import { normalizePersianText } from "./persian";
 import type {
+  AdminSystemStats,
+  AuthorizedPersonalProfile,
   ChatSession,
   CitySyncStatus,
   D1Database,
@@ -111,6 +113,10 @@ function cleanupStatements(db: D1Database) {
       "DELETE FROM notification_batches " +
         "WHERE julianday(created_at) < julianday('now', '-14 days')",
     ),
+    db.prepare(
+      "DELETE FROM personal_outage_notifications " +
+        "WHERE julianday(sent_at) < julianday('now', '-90 days')",
+    ),
   ];
 }
 
@@ -201,13 +207,6 @@ export async function listCityOutagesForIdentity(
   return result.results;
 }
 
-function escapeLike(value: string): string {
-  return value
-    .replaceAll("\\", "\\\\")
-    .replaceAll("%", "\\%")
-    .replaceAll("_", "\\_");
-}
-
 export async function searchCityOutages(
   db: D1Database,
   cityKey: string,
@@ -218,16 +217,15 @@ export async function searchCityOutages(
     return [];
   }
 
-  const pattern = `%${escapeLike(normalizedQuery)}%`;
-  const result = await db
-    .prepare(
-      `SELECT ${OUTAGE_COLUMNS} FROM outages ` +
-        "WHERE city_key = ? AND address LIKE ? ESCAPE '\\' " +
-        "ORDER BY outage_date, from_time, address LIMIT 150",
+  // Strict normalized substring matching only. No stop-word removal, fuzzy
+  // similarity, token scoring, or result re-ranking is applied. Filtering in
+  // the Worker also avoids D1 LIKE-pattern byte limits for Persian text.
+  const rows = await listCityOutages(db, cityKey);
+  return rows
+    .filter((row) =>
+      normalizePersianText(row.address).includes(normalizedQuery),
     )
-    .bind(cityKey, pattern)
-    .all<OutageRow>();
-  return result.results;
+    .slice(0, 150);
 }
 
 export async function getCitySyncStatus(
@@ -703,7 +701,8 @@ export async function getPersonalizationFlow(
 ): Promise<PersonalizationFlow | null> {
   return db
     .prepare(
-      "SELECT telegram_user_id, chat_id, state, city_key, match_mode, updated_at " +
+      "SELECT telegram_user_id, chat_id, state, city_key, match_mode, " +
+        "profile_id, profile_label, match_value, updated_at " +
         "FROM personalization_flows WHERE telegram_user_id = ?",
     )
     .bind(telegramUserId)
@@ -717,16 +716,20 @@ export async function setPersonalizationFlow(
   state: string,
   cityKey: string | null,
   matchMode: PersonalMatchMode | null,
+  profileId: string | null = null,
+  profileLabel: string | null = null,
+  matchValue: string | null = null,
 ): Promise<void> {
   await db
     .prepare(
       "INSERT INTO personalization_flows " +
-        "(telegram_user_id, chat_id, state, city_key, match_mode, updated_at) " +
-        "VALUES (?, ?, ?, ?, ?, ?) " +
+        "(telegram_user_id, chat_id, state, city_key, match_mode, profile_id, " +
+        "profile_label, match_value, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
         "ON CONFLICT(telegram_user_id) DO UPDATE SET " +
         "chat_id = excluded.chat_id, state = excluded.state, " +
         "city_key = excluded.city_key, match_mode = excluded.match_mode, " +
-        "updated_at = excluded.updated_at",
+        "profile_id = excluded.profile_id, profile_label = excluded.profile_label, " +
+        "match_value = excluded.match_value, updated_at = excluded.updated_at",
     )
     .bind(
       telegramUserId,
@@ -734,6 +737,9 @@ export async function setPersonalizationFlow(
       state,
       cityKey,
       matchMode,
+      profileId,
+      profileLabel,
+      matchValue,
       new Date().toISOString(),
     )
     .run();
@@ -749,48 +755,494 @@ export async function clearPersonalizationFlow(
     .run();
 }
 
+const PERSONAL_PROFILE_COLUMNS =
+  "profile_id, telegram_user_id, profile_label, city_key, match_mode, " +
+  "match_value, reminder_minutes, created_at, updated_at";
+
+export async function listPersonalOutageProfiles(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<PersonalOutageProfile[]> {
+  const result = await db
+    .prepare(
+      `SELECT ${PERSONAL_PROFILE_COLUMNS} FROM personal_outage_profiles ` +
+        "WHERE telegram_user_id = ? ORDER BY created_at, profile_id LIMIT 3",
+    )
+    .bind(telegramUserId)
+    .all<PersonalOutageProfile>();
+  return result.results;
+}
+
 export async function getPersonalOutageProfile(
   db: D1Database,
   telegramUserId: string,
+  profileId: string,
 ): Promise<PersonalOutageProfile | null> {
   return db
     .prepare(
-      "SELECT telegram_user_id, city_key, match_mode, match_value, " +
-        "created_at, updated_at FROM personal_outage_profiles " +
-        "WHERE telegram_user_id = ?",
+      `SELECT ${PERSONAL_PROFILE_COLUMNS} FROM personal_outage_profiles ` +
+        "WHERE telegram_user_id = ? AND profile_id = ?",
     )
-    .bind(telegramUserId)
+    .bind(telegramUserId, profileId)
     .first<PersonalOutageProfile>();
 }
 
 export async function savePersonalOutageProfile(
   db: D1Database,
   telegramUserId: string,
+  profileId: string | null,
+  profileLabel: string,
   cityKey: string,
   matchMode: PersonalMatchMode,
   matchValue: string,
-): Promise<void> {
+  reminderMinutes: number,
+): Promise<PersonalOutageProfile> {
+  if (![0, 30, 60].includes(reminderMinutes)) {
+    throw new Error("Invalid reminder minutes.");
+  }
   const now = new Date().toISOString();
-  await db
+  const duplicate = await db
     .prepare(
-      "INSERT INTO personal_outage_profiles " +
-        "(telegram_user_id, city_key, match_mode, match_value, created_at, updated_at) " +
-        "VALUES (?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT(telegram_user_id) DO UPDATE SET " +
-        "city_key = excluded.city_key, match_mode = excluded.match_mode, " +
-        "match_value = excluded.match_value, updated_at = excluded.updated_at",
+      "SELECT profile_id FROM personal_outage_profiles " +
+        "WHERE telegram_user_id = ? AND city_key = ? AND match_mode = ? " +
+        "AND match_value = ? AND (? IS NULL OR profile_id <> ?) LIMIT 1",
     )
-    .bind(telegramUserId, cityKey, matchMode, matchValue, now, now)
-    .run();
+    .bind(
+      telegramUserId,
+      cityKey,
+      matchMode,
+      matchValue,
+      profileId,
+      profileId,
+    )
+    .first<{ profile_id: string }>();
+  if (duplicate) {
+    throw new Error("Duplicate personal outage profile.");
+  }
+
+  if (profileId) {
+    const result = await db
+      .prepare(
+        "UPDATE personal_outage_profiles SET profile_label = ?, city_key = ?, " +
+          "match_mode = ?, match_value = ?, reminder_minutes = ?, updated_at = ? " +
+          "WHERE telegram_user_id = ? AND profile_id = ?",
+      )
+      .bind(
+        profileLabel,
+        cityKey,
+        matchMode,
+        matchValue,
+        reminderMinutes,
+        now,
+        telegramUserId,
+        profileId,
+      )
+      .run();
+    if ((result.meta.changes ?? 0) === 0) {
+      throw new Error("Personal outage profile was not found for editing.");
+    }
+  } else {
+    const count = await db
+      .prepare(
+        "SELECT COUNT(*) AS total FROM personal_outage_profiles " +
+          "WHERE telegram_user_id = ?",
+      )
+      .bind(telegramUserId)
+      .first<{ total: number }>();
+    if ((count?.total ?? 0) >= 3) {
+      throw new Error("A user can save at most three personal outage profiles.");
+    }
+
+    profileId = crypto.randomUUID().replaceAll("-", "");
+    await db
+      .prepare(
+        "INSERT INTO personal_outage_profiles " +
+          "(profile_id, telegram_user_id, profile_label, city_key, match_mode, " +
+          "match_value, reminder_minutes, created_at, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        profileId,
+        telegramUserId,
+        profileLabel,
+        cityKey,
+        matchMode,
+        matchValue,
+        reminderMinutes,
+        now,
+        now,
+      )
+      .run();
+  }
+
+  const saved = await getPersonalOutageProfile(db, telegramUserId, profileId);
+  if (!saved) {
+    throw new Error("Personal outage profile was not saved.");
+  }
+  return saved;
 }
 
 export async function deletePersonalOutageProfile(
   db: D1Database,
   telegramUserId: string,
+  profileId: string,
 ): Promise<boolean> {
   const result = await db
-    .prepare("DELETE FROM personal_outage_profiles WHERE telegram_user_id = ?")
-    .bind(telegramUserId)
+    .prepare(
+      "DELETE FROM personal_outage_profiles " +
+        "WHERE telegram_user_id = ? AND profile_id = ?",
+    )
+    .bind(telegramUserId, profileId)
     .run();
   return (result.meta.changes ?? 0) > 0;
+}
+
+export async function listAuthorizedTelegramUsers(
+  db: D1Database,
+  limit = 50,
+): Promise<TelegramUserRecord[]> {
+  const result = await db
+    .prepare(
+      "SELECT telegram_user_id, chat_id, username, first_name, last_name, " +
+        "is_authorized, authorized_at, revoked_at, last_seen_at, " +
+        "failed_password_attempts, password_window_started_at, locked_until " +
+        "FROM telegram_users WHERE is_authorized = 1 " +
+        "ORDER BY last_seen_at DESC LIMIT ?",
+    )
+    .bind(limit)
+    .all<TelegramUserRecord>();
+  return result.results;
+}
+
+export async function listAuthorizedPersonalProfilesByCity(
+  db: D1Database,
+  cityKey: string,
+): Promise<AuthorizedPersonalProfile[]> {
+  const result = await db
+    .prepare(
+      "SELECT p.profile_id, p.telegram_user_id, p.profile_label, p.city_key, " +
+        "p.match_mode, p.match_value, p.reminder_minutes, p.created_at, p.updated_at, " +
+        "u.chat_id, u.username, u.first_name, u.last_name " +
+        "FROM personal_outage_profiles p " +
+        "JOIN telegram_users u ON u.telegram_user_id = p.telegram_user_id " +
+        "WHERE p.city_key = ? AND u.is_authorized = 1 " +
+        "ORDER BY p.telegram_user_id, p.created_at",
+    )
+    .bind(cityKey)
+    .all<AuthorizedPersonalProfile>();
+  return result.results;
+}
+
+export async function listSentPersonalNotificationProfileIds(
+  db: D1Database,
+  cityKey: string,
+  snapshotDate: string,
+): Promise<Set<string>> {
+  const result = await db
+    .prepare(
+      "SELECT profile_id FROM personal_outage_notifications " +
+        "WHERE city_key = ? AND snapshot_date = ?",
+    )
+    .bind(cityKey, snapshotDate)
+    .all<{ profile_id: string }>();
+  return new Set(result.results.map((row) => row.profile_id));
+}
+
+export async function recordPersonalNotificationDeliveries(
+  db: D1Database,
+  snapshotDate: string,
+  deliveries: Array<{
+    profile: AuthorizedPersonalProfile;
+    matchedOutageKeys: string[];
+  }>,
+): Promise<void> {
+  if (deliveries.length === 0) {
+    return;
+  }
+  const sentAt = new Date().toISOString();
+  await db.batch(
+    deliveries.map(({ profile, matchedOutageKeys }) =>
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO personal_outage_notifications " +
+            "(profile_id, telegram_user_id, city_key, snapshot_date, " +
+            "matched_outage_keys, sent_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          profile.profile_id,
+          profile.telegram_user_id,
+          profile.city_key,
+          snapshotDate,
+          JSON.stringify(matchedOutageKeys),
+          sentAt,
+        ),
+    ),
+  );
+}
+
+
+export async function listSentPersonalChangeEventKeys(
+  db: D1Database,
+  cityKey: string,
+  snapshotDate: string,
+): Promise<Set<string>> {
+  const result = await db
+    .prepare(
+      "SELECT event_key FROM personal_outage_change_notifications " +
+        "WHERE city_key = ? AND snapshot_date = ?",
+    )
+    .bind(cityKey, snapshotDate)
+    .all<{ event_key: string }>();
+  return new Set(result.results.map((row) => row.event_key));
+}
+
+export async function recordPersonalChangeDeliveries(
+  db: D1Database,
+  deliveries: Array<{
+    eventKey: string;
+    profile: AuthorizedPersonalProfile;
+    snapshotDate: string;
+    outageKey: string;
+    changeType: string;
+  }>,
+): Promise<void> {
+  if (deliveries.length === 0) {
+    return;
+  }
+  const sentAt = new Date().toISOString();
+  await db.batch(
+    deliveries.map((delivery) =>
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO personal_outage_change_notifications " +
+            "(event_key, profile_id, telegram_user_id, city_key, snapshot_date, " +
+            "outage_key, change_type, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          delivery.eventKey,
+          delivery.profile.profile_id,
+          delivery.profile.telegram_user_id,
+          delivery.profile.city_key,
+          delivery.snapshotDate,
+          delivery.outageKey,
+          delivery.changeType,
+          sentAt,
+        ),
+    ),
+  );
+}
+
+export async function listAuthorizedPersonalProfilesWithReminders(
+  db: D1Database,
+): Promise<AuthorizedPersonalProfile[]> {
+  const result = await db
+    .prepare(
+      "SELECT p.profile_id, p.telegram_user_id, p.profile_label, p.city_key, " +
+        "p.match_mode, p.match_value, p.reminder_minutes, p.created_at, p.updated_at, " +
+        "u.chat_id, u.username, u.first_name, u.last_name " +
+        "FROM personal_outage_profiles p " +
+        "JOIN telegram_users u ON u.telegram_user_id = p.telegram_user_id " +
+        "WHERE u.is_authorized = 1 AND p.reminder_minutes > 0 " +
+        "ORDER BY p.telegram_user_id, p.created_at",
+    )
+    .all<AuthorizedPersonalProfile>();
+  return result.results;
+}
+
+export async function listSentReminderKeys(
+  db: D1Database,
+  snapshotDates: string[],
+): Promise<Set<string>> {
+  if (snapshotDates.length === 0) {
+    return new Set();
+  }
+  const placeholders = snapshotDates.map(() => "?").join(", ");
+  const result = await db
+    .prepare(
+      "SELECT profile_id, snapshot_date, outage_key, reminder_minutes " +
+        "FROM personal_outage_reminders WHERE snapshot_date IN (" +
+        placeholders +
+        ")",
+    )
+    .bind(...snapshotDates)
+    .all<{
+      profile_id: string;
+      snapshot_date: string;
+      outage_key: string;
+      reminder_minutes: number;
+    }>();
+  return new Set(
+    result.results.map(
+      (row) =>
+        `${row.profile_id}|${row.snapshot_date}|${row.outage_key}|${row.reminder_minutes}`,
+    ),
+  );
+}
+
+export async function recordReminderDeliveries(
+  db: D1Database,
+  deliveries: Array<{
+    profile: AuthorizedPersonalProfile;
+    snapshotDate: string;
+    outageKey: string;
+  }>,
+): Promise<void> {
+  if (deliveries.length === 0) {
+    return;
+  }
+  const sentAt = new Date().toISOString();
+  await db.batch(
+    deliveries.map((delivery) =>
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO personal_outage_reminders " +
+            "(profile_id, telegram_user_id, city_key, snapshot_date, outage_key, " +
+            "reminder_minutes, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          delivery.profile.profile_id,
+          delivery.profile.telegram_user_id,
+          delivery.profile.city_key,
+          delivery.snapshotDate,
+          delivery.outageKey,
+          delivery.profile.reminder_minutes,
+          sentAt,
+        ),
+    ),
+  );
+}
+
+async function countTable(
+  db: D1Database,
+  sql: string,
+): Promise<number> {
+  const row = await db.prepare(sql).first<{ total: number }>();
+  return Number(row?.total ?? 0);
+}
+
+export async function getAdminSystemStats(
+  db: D1Database,
+): Promise<AdminSystemStats> {
+  const [
+    authorizedUsers,
+    personalProfiles,
+    activeOutages,
+    archivedOutages,
+    observations,
+    dailyNotifications,
+    changeNotifications,
+    reminders,
+    pendingSpecialRequests,
+    supportStarsTotal,
+    pendingTetherSubmissions,
+    manualOperations24h,
+  ] = await Promise.all([
+    countTable(db, "SELECT COUNT(*) AS total FROM telegram_users WHERE is_authorized = 1"),
+    countTable(db, "SELECT COUNT(*) AS total FROM personal_outage_profiles"),
+    countTable(db, "SELECT COUNT(*) AS total FROM outages"),
+    countTable(db, "SELECT COUNT(*) AS total FROM outage_archive"),
+    countTable(db, "SELECT COUNT(*) AS total FROM outage_number_observations"),
+    countTable(
+      db,
+      "SELECT COUNT(*) AS total FROM personal_outage_notifications " +
+        "WHERE julianday(sent_at) >= julianday('now', '-1 day')",
+    ),
+    countTable(
+      db,
+      "SELECT COUNT(*) AS total FROM personal_outage_change_notifications " +
+        "WHERE julianday(sent_at) >= julianday('now', '-1 day')",
+    ),
+    countTable(
+      db,
+      "SELECT COUNT(*) AS total FROM personal_outage_reminders " +
+        "WHERE julianday(sent_at) >= julianday('now', '-1 day')",
+    ),
+    countTable(db, "SELECT COUNT(*) AS total FROM special_lookup_requests WHERE status = 'pending'"),
+    countTable(db, "SELECT COALESCE(SUM(amount), 0) AS total FROM support_payments WHERE currency = 'XTR' AND status = 'paid'"),
+    countTable(db, "SELECT COUNT(*) AS total FROM support_tether_submissions WHERE status = 'pending'"),
+    countTable(
+      db,
+      "SELECT COUNT(*) AS total FROM admin_operation_runs " +
+        "WHERE julianday(created_at) >= julianday('now', '-1 day')",
+    ),
+  ]);
+  return {
+    authorized_users: authorizedUsers,
+    personal_profiles: personalProfiles,
+    active_outages: activeOutages,
+    archived_outages: archivedOutages,
+    outage_number_observations: observations,
+    daily_notifications_24h: dailyNotifications,
+    change_notifications_24h: changeNotifications,
+    reminders_24h: reminders,
+    pending_special_requests: pendingSpecialRequests,
+    support_stars_total: supportStarsTotal,
+    pending_tether_submissions: pendingTetherSubmissions,
+    manual_operations_24h: manualOperations24h,
+  };
+}
+
+export async function runDatabaseMaintenance(
+  db: D1Database,
+): Promise<{ deletedRows: number }> {
+  const statements = [
+    db.prepare(
+      "DELETE FROM processed_updates WHERE processed_at < datetime('now', '-30 days')",
+    ),
+    db.prepare(
+      "DELETE FROM notification_batches " +
+        "WHERE julianday(created_at) < julianday('now', '-14 days')",
+    ),
+    db.prepare(
+      "DELETE FROM personal_outage_notifications " +
+        "WHERE julianday(sent_at) < julianday('now', '-90 days')",
+    ),
+    db.prepare(
+      "DELETE FROM personal_outage_change_notifications " +
+        "WHERE julianday(sent_at) < julianday('now', '-180 days')",
+    ),
+    db.prepare(
+      "DELETE FROM personal_outage_reminders " +
+        "WHERE julianday(sent_at) < julianday('now', '-180 days')",
+    ),
+    db.prepare(
+      "DELETE FROM outage_archive " +
+        "WHERE julianday(archived_at) < julianday('now', '-365 days')",
+    ),
+    db.prepare(
+      "DELETE FROM outage_number_observations " +
+        "WHERE julianday(last_seen_at) < julianday('now', '-730 days')",
+    ),
+    db.prepare(
+      "DELETE FROM admin_operation_runs " +
+        "WHERE julianday(created_at) < julianday('now', '-90 days')",
+    ),
+    db.prepare(
+      "DELETE FROM city_discovery_bulk_batches " +
+        "WHERE status <> 'pending' AND julianday(created_at) < julianday('now', '-180 days')",
+    ),
+    db.prepare(
+      "DELETE FROM special_lookup_flows " +
+        "WHERE julianday(updated_at) < julianday('now', '-1 day')",
+    ),
+    db.prepare(
+      "DELETE FROM support_flows " +
+        "WHERE julianday(updated_at) < julianday('now', '-1 day')",
+    ),
+    db.prepare(
+      "DELETE FROM special_lookup_requests " +
+        "WHERE status = 'rejected' AND julianday(updated_at) < julianday('now', '-90 days')",
+    ),
+    db.prepare(
+      "DELETE FROM support_tether_submissions " +
+        "WHERE status <> 'pending' AND julianday(created_at) < julianday('now', '-365 days')",
+    ),
+  ];
+  const results = await db.batch(statements);
+  return {
+    deletedRows: results.reduce(
+      (total, result) => total + Number(result.meta.changes ?? 0),
+      0,
+    ),
+  };
 }

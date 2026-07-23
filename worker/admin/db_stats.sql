@@ -11,4 +11,9 @@ UNION ALL SELECT 'personal_outage_reminders', COUNT(*) FROM personal_outage_remi
 UNION ALL SELECT 'city_sources', COUNT(*) FROM city_sources
 UNION ALL SELECT 'managed_cities', COUNT(*) FROM managed_cities
 UNION ALL SELECT 'city_source_proposals', COUNT(*) FROM city_source_proposals
-UNION ALL SELECT 'admin_flows', COUNT(*) FROM admin_flows;
+UNION ALL SELECT 'admin_flows', COUNT(*) FROM admin_flows
+UNION ALL SELECT 'admin_operation_runs', COUNT(*) FROM admin_operation_runs
+UNION ALL SELECT 'city_discovery_bulk_batches', COUNT(*) FROM city_discovery_bulk_batches
+UNION ALL SELECT 'special_lookup_requests', COUNT(*) FROM special_lookup_requests
+UNION ALL SELECT 'support_payments', COUNT(*) FROM support_payments
+UNION ALL SELECT 'support_tether_submissions', COUNT(*) FROM support_tether_submissions;

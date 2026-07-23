@@ -1,0 +1,91 @@
+name: Manual Bot Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation requested from the Telegram admin panel
+        required: true
+        type: choice
+        options:
+          - fetch
+          - discover_pending
+          - discover_all
+      operation_id:
+        description: Internal operation ID returned by the Worker
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bbs-bargh-manual-operations
+  cancel-in-progress: false
+
+jobs:
+  run-operation:
+    runs-on: self-hosted
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate runner and secrets
+        shell: powershell
+        env:
+          WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
+          WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_SYNC_URL)) {
+            throw "GitHub secret WORKER_SYNC_URL is missing."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_SYNC_SECRET)) {
+            throw "GitHub secret WORKER_SYNC_SECRET is missing."
+          }
+          python --version
+
+      - name: Run requested operation
+        shell: powershell
+        env:
+          WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
+          WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
+          MANUAL_OPERATION_ID: ${{ inputs.operation_id }}
+          FETCH_SOURCE: telegram-admin-manual
+          AUTO_DISCOVER_MAZTOZI_SOURCES: "0"
+          PLAYWRIGHT_BROWSER_CHANNEL: chrome
+        run: |
+          $ErrorActionPreference = "Stop"
+          $operation = "${{ inputs.operation }}"
+
+          switch ($operation) {
+            "fetch" {
+              python .\khamooshi_notify.py
+              break
+            }
+            "discover_pending" {
+              python -c "import playwright" 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                python -m pip install playwright
+              }
+              python .\discover_maztozi_sources.py `
+                --mode pending `
+                --operation-id "${{ inputs.operation_id }}"
+              break
+            }
+            "discover_all" {
+              python -c "import playwright" 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                python -m pip install playwright
+              }
+              python .\discover_maztozi_sources.py `
+                --mode all `
+                --operation-id "${{ inputs.operation_id }}"
+              break
+            }
+            default {
+              throw "Unsupported operation: $operation"
+            }
+          }

@@ -5,10 +5,12 @@ import {
   runDatabaseMaintenance,
 } from "./database";
 import {
+  createBulkDiscoveryBatch,
   createCitySourceProposal,
   listActiveCityConfigs,
   listManagedCities,
   listPendingDiscoveryCities,
+  parseBulkDiscoverySummary,
 } from "./cities";
 import { cityByKey, setRuntimeCities } from "./config";
 import {
@@ -18,6 +20,7 @@ import {
   setTelegramWebhook,
 } from "./telegram";
 import { synchronizeSnapshots } from "./sync";
+import { completeManualOperation } from "./manual-operations";
 import type {
   Env,
   ExecutionContextLike,
@@ -37,6 +40,15 @@ function jsonResponse(data: unknown, status = 200): Response {
 
 function unauthorized(): Response {
   return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function hasBearerSecret(request: Request, expected: string): boolean {
@@ -104,17 +116,17 @@ async function notifyAdminDiscoveryProposal(
   const text = proposal.error_text
     ? [
         "⚠️ <b>کشف خودکار منابع شهر ناموفق بود</b>",
-        `🏙 <b>شهر:</b> ${proposal.city_label}`,
-        `📝 <b>خطا:</b> ${proposal.error_text}`,
+        `🏙 <b>شهر:</b> ${escapeHtml(proposal.city_label)}`,
+        `📝 <b>خطا:</b> ${escapeHtml(proposal.error_text)}`,
         "",
         "می‌توانید از بخش مدیریت شهرها شماره‌ها را دستی وارد کنید.",
       ].join("\n")
     : [
         "🔎 <b>شماره‌های منبع Maztozi پیدا شد</b>",
-        `🏙 <b>شهر:</b> ${proposal.city_label}`,
+        `🏙 <b>شهر:</b> ${escapeHtml(proposal.city_label)}`,
         `🔢 <b>شماره‌ها:</b> ${ids.join("، ") || "هیچ موردی"}`,
         "",
-        "پس از تأیید، شهر فعال و در اجرای بعدی Fetch دریافت می‌شود.",
+        "پس از تأیید، شهر فعال می‌شود و می‌توانید از پنل مدیریت «Fetch کامل الان» را اجرا کنید.",
       ].join("\n");
   const replyMarkup = proposal.error_text
     ? undefined
@@ -142,6 +154,82 @@ async function notifyAdminDiscoveryProposal(
   });
 }
 
+
+async function notifyAdminBulkDiscovery(
+  env: Env,
+  batch: {
+    batch_id: string;
+    discovered_city_count: number;
+    clean_city_count: number;
+    conflict_count: number;
+    error_count: number;
+    summary_json: string;
+  },
+): Promise<void> {
+  const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim() ?? "";
+  if (!adminId) return;
+  const summary = parseBulkDiscoverySummary(batch as never);
+  const conflictLines = summary.conflicts.slice(0, 8).map(
+    (row) => `• ${escapeHtml(row.label)}: ${escapeHtml(row.detail)}`,
+  );
+  const errorLines = summary.errors.slice(0, 8).map(
+    (row) => `• ${escapeHtml(row.label)}: ${escapeHtml(row.detail)}`,
+  );
+  const text = [
+    "🌐 <b>کشف همه شهرهای Maztozi پایان یافت</b>",
+    "",
+    `🏙 <b>شهرهای بررسی‌شده:</b> ${batch.discovered_city_count}`,
+    `✅ <b>قابل اعمال:</b> ${batch.clean_city_count}`,
+    `⚠️ <b>دارای تداخل:</b> ${batch.conflict_count}`,
+    `❌ <b>ناموفق:</b> ${batch.error_count}`,
+    ...(conflictLines.length ? ["", "<b>تداخل‌ها:</b>", ...conflictLines] : []),
+    ...(errorLines.length ? ["", "<b>خطاها:</b>", ...errorLines] : []),
+    "",
+    "با تأیید، فقط موارد بدون تداخل ذخیره و فعال می‌شوند. هیچ شهر فعلی خودکار حذف نمی‌شود.",
+  ].join("\n");
+  await callTelegram(env, "sendMessage", {
+    chat_id: adminId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            text: "✅ اعمال موارد سالم",
+            callback_data: `admin_bulk_accept:${batch.batch_id}`,
+          },
+          {
+            text: "❌ رد همه",
+            callback_data: `admin_bulk_reject:${batch.batch_id}`,
+          },
+        ],
+        [{ text: "🏠 منوی اصلی", callback_data: "go_main" }],
+      ],
+    },
+  });
+}
+
+async function notifyAdminManualOperationResult(
+  env: Env,
+  operationId: string,
+  ok: boolean,
+  errorText: string,
+): Promise<void> {
+  const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim() ?? "";
+  if (!adminId) return;
+  await callTelegram(env, "sendMessage", {
+    chat_id: adminId,
+    text: ok
+      ? `✅ عملیات دستی با موفقیت پایان یافت.\n<code>${escapeHtml(operationId)}</code>`
+      : `⚠️ عملیات دستی ناموفق بود.\n<code>${escapeHtml(operationId)}</code>\n\n${escapeHtml(errorText || "خطای نامشخص")}`,
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [[{ text: "🏠 منوی اصلی", callback_data: "go_main" }]],
+    },
+  });
+}
+
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
 
@@ -160,7 +248,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     });
   }
 
-  if (request.method === "GET" && url.pathname === "/fetch-config") {
+  if (
+    request.method === "GET" &&
+    (url.pathname === "/fetch-config" || url.pathname === "/admin/fetch-config")
+  ) {
     if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
     const [managed, pendingDiscovery] = await Promise.all([
       listManagedCities(env.DB),
@@ -206,6 +297,53 @@ async function route(request: Request, env: Env): Promise<Response> {
     );
     await notifyAdminDiscoveryProposal(env, proposal);
     return jsonResponse({ ok: true, proposal_id: proposal.proposal_id });
+  }
+
+  if (
+    request.method === "POST" &&
+    url.pathname === "/admin/city-discovery-bulk-result"
+  ) {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
+    const raw = await parseJson(request);
+    if (!raw || typeof raw !== "object") {
+      return jsonResponse({ ok: false, error: "JSON object required." }, 400);
+    }
+    const cities = (raw as { cities?: unknown }).cities;
+    if (!Array.isArray(cities) || cities.length === 0 || cities.length > 200) {
+      return jsonResponse({ ok: false, error: "cities must be a non-empty array." }, 400);
+    }
+    const normalized = cities.map((item) => {
+      const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      return {
+        label: String(row.label ?? "").trim(),
+        source_city_ids: parsePositiveIds(row.source_city_ids),
+        error: String(row.error ?? "").trim().slice(0, 900),
+      };
+    });
+    const batch = await createBulkDiscoveryBatch(env.DB, normalized);
+    await notifyAdminBulkDiscovery(env, batch);
+    return jsonResponse({ ok: true, batch_id: batch.batch_id });
+  }
+
+  if (
+    request.method === "POST" &&
+    url.pathname === "/admin/manual-operation-result"
+  ) {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
+    const raw = await parseJson(request);
+    if (!raw || typeof raw !== "object") {
+      return jsonResponse({ ok: false, error: "JSON object required." }, 400);
+    }
+    const body = raw as Record<string, unknown>;
+    const operationId = String(body.operation_id ?? "").trim();
+    const ok = body.ok === true;
+    const errorText = String(body.error ?? "").trim().slice(0, 1000);
+    if (!/^[a-f0-9]{32}$/i.test(operationId)) {
+      return jsonResponse({ ok: false, error: "operation_id is invalid." }, 400);
+    }
+    await completeManualOperation(env.DB, operationId, ok ? "completed" : "failed", errorText);
+    await notifyAdminManualOperationResult(env, operationId, ok, errorText);
+    return jsonResponse({ ok: true });
   }
 
   if (request.method === "POST" && url.pathname === "/sync") {

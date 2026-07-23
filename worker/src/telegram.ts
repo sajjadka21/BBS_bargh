@@ -3,6 +3,7 @@ import {
   ADMIN_STATUS_BUTTON,
   ADMIN_USERS_BUTTON,
   ADMIN_CITIES_BUTTON,
+  ADMIN_SPECIAL_REQUESTS_BUTTON,
   ADMIN_ADD_CITY_BUTTON,
   ADMIN_AUTO_SOURCE_BUTTON,
   ADMIN_MANUAL_SOURCE_BUTTON,
@@ -13,6 +14,8 @@ import {
   PERSONAL_ADDRESS_MODE_BUTTON,
   PERSONAL_NUMBER_MODE_BUTTON,
   PERSONAL_OUTAGE_BUTTON,
+  SPECIAL_LOOKUP_BUTTON,
+  SUPPORT_BUTTON,
   REMINDER_30_BUTTON,
   REMINDER_60_BUTTON,
   REMINDER_NONE_BUTTON,
@@ -32,19 +35,47 @@ import {
 import {
   acceptCitySourceProposal,
   adminFlowSourceIds,
+  applyBulkDiscoveryBatch,
   clearAdminFlow,
   deactivateManagedCity,
   findCityByLabel,
   findSourceConflicts,
   getAdminFlow,
+  getBulkDiscoveryBatch,
   getCitySourceProposal,
   getManagedCity,
   listManagedCities,
+  parseBulkDiscoverySummary,
+  rejectBulkDiscoveryBatch,
   rejectCitySourceProposal,
   requestCityDiscovery,
   saveManagedCity,
   setAdminFlow,
 } from "./cities";
+import { dispatchManualOperation, type ManualOperationType } from "./manual-operations";
+import {
+  clearSpecialLookupFlow,
+  createSpecialLookupRequest,
+  decideSpecialLookupRequest,
+  getSpecialLookupFlow,
+  getSpecialLookupRequest,
+  listSpecialLookupRequests,
+  listUserSpecialLookupRequests,
+  maskBillId,
+  protectBillId,
+  revealBillId,
+  setSpecialLookupFlow,
+  type SpecialLookupRequest,
+} from "./special-requests";
+import {
+  clearSupportFlow,
+  createTetherSubmission,
+  decideTetherSubmission,
+  getSupportFlow,
+  getTetherSubmission,
+  recordStarSupportPayment,
+  setSupportFlow,
+} from "./support";
 import {
   authorizeTelegramUser,
   claimUpdate,
@@ -89,6 +120,7 @@ import type {
   PersonalizationFlow,
   TelegramCallbackQuery,
   TelegramMessage,
+  TelegramPreCheckoutQuery,
   TelegramReplyMarkup,
   TelegramUpdate,
   TelegramUser,
@@ -120,6 +152,31 @@ const ADMIN_CITY_ACCEPT_PREFIX = "admin_city_accept:";
 const ADMIN_CITY_REJECT_PREFIX = "admin_city_reject:";
 const ADMIN_REVOKE_PREFIX = "admin_revoke:";
 const ADMIN_REVOKE_CONFIRM_PREFIX = "admin_revoke_yes:";
+const ADMIN_MANUAL_FETCH_CALLBACK = "admin_manual_fetch";
+const ADMIN_DISCOVER_PENDING_CALLBACK = "admin_discover_pending";
+const ADMIN_DISCOVER_ALL_CALLBACK = "admin_discover_all";
+const ADMIN_OPERATION_CONFIRM_PREFIX = "admin_operation_yes:";
+const ADMIN_BULK_ACCEPT_PREFIX = "admin_bulk_accept:";
+const ADMIN_BULK_REJECT_PREFIX = "admin_bulk_reject:";
+const ADMIN_SPECIAL_CALLBACK = "admin_special";
+const ADMIN_SPECIAL_SHOW_PREFIX = "admin_special_show:";
+const ADMIN_SPECIAL_APPROVE_PREFIX = "admin_special_approve:";
+const ADMIN_SPECIAL_REJECT_PREFIX = "admin_special_reject:";
+const ADMIN_SPECIAL_APPROVE_CONFIRM_PREFIX = "admin_special_approve_yes:";
+const ADMIN_SPECIAL_REJECT_CONFIRM_PREFIX = "admin_special_reject_yes:";
+const ADMIN_SPECIAL_REVEAL_PREFIX = "admin_special_reveal:";
+const ADMIN_SPECIAL_REVEAL_CONFIRM_PREFIX = "admin_special_reveal_yes:";
+const SPECIAL_HOME_CALLBACK = "special_home";
+const SPECIAL_ADD_CALLBACK = "special_add";
+const SPECIAL_SUBMIT_CALLBACK = "special_submit_yes";
+const SPECIAL_CANCEL_CALLBACK = "special_cancel";
+const SUPPORT_HOME_CALLBACK = "support_home";
+const SUPPORT_STARS_PREFIX = "support_stars:";
+const SUPPORT_TETHER_CALLBACK = "support_tether";
+const SUPPORT_TETHER_APPROVE_PREFIX = "support_tether_ok:";
+const SUPPORT_TETHER_REJECT_PREFIX = "support_tether_no:";
+const SUPPORT_TETHER_APPROVE_CONFIRM_PREFIX = "support_tether_ok_yes:";
+const SUPPORT_TETHER_REJECT_CONFIRM_PREFIX = "support_tether_no_yes:";
 
 const PASSWORD_WINDOW_MINUTES = 15;
 const PERSONALIZATION_FLOW_PASSWORD = "awaiting_password";
@@ -412,6 +469,519 @@ export async function sendBlocks(
   }
 }
 
+
+function manualOperationLabel(operation: ManualOperationType): string {
+  if (operation === "fetch") return "Fetch کامل خاموشی‌ها";
+  if (operation === "discover_pending") return "کشف شهرهای در انتظار";
+  return "کشف همه شهرهای Maztozi";
+}
+
+async function showManualOperationConfirmation(
+  env: Env,
+  chatId: string,
+  operation: ManualOperationType,
+): Promise<void> {
+  const warnings = operation === "fetch"
+    ? "تمام شهرهای فعال همین حالا Fetch و با سیاست Snapshot همگام می‌شوند."
+    : operation === "discover_pending"
+      ? "فقط شهرهایی که خودتان درخواست کشف داده‌اید بررسی می‌شوند."
+      : "مرورگر همه شهرستان‌های Maztozi را بررسی می‌کند. نتیجه بدون تأیید شما اعمال نمی‌شود.";
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "⚠️ <b>تأیید عملیات دستی</b>",
+      `عملیات: <b>${manualOperationLabel(operation)}</b>`,
+      "",
+      warnings,
+      "",
+      "Self-hosted Runner باید روشن و آنلاین باشد.",
+    ].join("\n"),
+    {
+      inline_keyboard: [
+        [
+          {
+            text: "✅ بله، اجرا شود",
+            callback_data: `${ADMIN_OPERATION_CONFIRM_PREFIX}${operation}`,
+          },
+          { text: "❌ انصراف", callback_data: ADMIN_CITIES_CALLBACK },
+        ],
+        [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+      ],
+    },
+  );
+}
+
+function specialStatusLabel(status: string): string {
+  if (status === "pending") return "در انتظار بررسی مدیر";
+  if (status === "approved") return "پذیرفته‌شده برای اتصال فنی";
+  if (status === "active") return "فعال";
+  if (status === "rejected") return "امکان پشتیبانی ندارد";
+  return status;
+}
+
+function specialRequestSummary(request: SpecialLookupRequest): string {
+  return [
+    `🏷 <b>نام:</b> ${escapeHtml(request.request_label)}`,
+    `🗺 <b>استان:</b> ${escapeHtml(request.province)}`,
+    `🏙 <b>شهرستان:</b> ${escapeHtml(request.county)}`,
+    `🧾 <b>شناسه قبض:</b> <code>${maskBillId(request.bill_id_last4)}</code>`,
+    `📌 <b>وضعیت:</b> ${escapeHtml(specialStatusLabel(request.status))}`,
+  ].join("\n");
+}
+
+async function openSpecialLookupHome(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  const requests = await listUserSpecialLookupRequests(env.DB, telegramUserId, 10);
+  const text = requests.length
+    ? [
+        "⭐ <b>استعلام ویژه با شناسه قبض</b>",
+        "",
+        "درخواست‌های شما:",
+        ...requests.map((request, index) =>
+          `${toPersianDigits(index + 1)}. ${escapeHtml(request.request_label)} — ${escapeHtml(specialStatusLabel(request.status))} — ${maskBillId(request.bill_id_last4)}`,
+        ),
+        "",
+        "ثبت درخواست به معنی فعال‌شدن خودکار نیست؛ ابتدا مدیر سامانه استان را بررسی می‌کند.",
+      ].join("\n")
+    : [
+        "⭐ <b>استعلام ویژه با شناسه قبض</b>",
+        "",
+        "استان، شهرستان و شناسه قبض را ثبت می‌کنید. مدیر بررسی می‌کند آیا سامانه رسمی آن منطقه بدون مانع احراز هویت قابل اتصال است یا نه.",
+      ].join("\n");
+  await sendMessage(env, chatId, text, {
+    inline_keyboard: [
+      [{ text: "➕ ثبت درخواست جدید", callback_data: SPECIAL_ADD_CALLBACK }],
+      [{ text: "🔄 تازه‌سازی", callback_data: SPECIAL_HOME_CALLBACK }],
+      [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+    ],
+  });
+}
+
+async function beginSpecialLookupRequest(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  await clearSpecialLookupFlow(env.DB, telegramUserId);
+  await setSpecialLookupFlow(env.DB, telegramUserId, chatId, "awaiting_province");
+  await sendMessage(
+    env,
+    chatId,
+    "نام استان را وارد کنید؛ مثلاً «تهران» یا «فارس».",
+    {
+      keyboard: [[{ text: CANCEL_BUTTON }, { text: MAIN_MENU_BUTTON }]],
+      resize_keyboard: true,
+      is_persistent: true,
+    },
+  );
+}
+
+async function notifyAdminSpecialRequest(
+  env: Env,
+  request: SpecialLookupRequest,
+): Promise<void> {
+  const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim();
+  if (!adminId) return;
+  await sendMessage(
+    env,
+    adminId,
+    [
+      "⭐ <b>درخواست استعلام ویژه جدید</b>",
+      `👤 <b>کاربر:</b> <code>${request.telegram_user_id}</code>`,
+      specialRequestSummary(request),
+      "",
+      "برای بررسی سایت استان، می‌توانید پس از تأیید حساس شناسه کامل را نمایش دهید.",
+    ].join("\n"),
+    {
+      inline_keyboard: [
+        [
+          {
+            text: "🔎 بررسی درخواست",
+            callback_data: `${ADMIN_SPECIAL_SHOW_PREFIX}${request.request_id}`,
+          },
+        ],
+        [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+      ],
+    },
+  );
+}
+
+async function handleSpecialLookupTextFlow(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+  text: string,
+): Promise<boolean> {
+  const flow = await getSpecialLookupFlow(env.DB, telegramUserId);
+  if (!flow) return false;
+  if (text === CANCEL_BUTTON || text === MAIN_MENU_BUTTON) {
+    await clearSpecialLookupFlow(env.DB, telegramUserId);
+    if (text === MAIN_MENU_BUTTON) {
+      await sendMessage(env, chatId, "یک گزینه را انتخاب کنید:", mainMenuFor(env, telegramUserId));
+    } else {
+      await openSpecialLookupHome(env, chatId, telegramUserId);
+    }
+    return true;
+  }
+  const value = normalizePersianText(text);
+  if (flow.state === "awaiting_province") {
+    if (value.length < 2 || value.length > 50) {
+      await sendMessage(env, chatId, "نام استان باید بین ۲ تا ۵۰ نویسه باشد.");
+      return true;
+    }
+    await setSpecialLookupFlow(env.DB, telegramUserId, chatId, "awaiting_county", {
+      province: value,
+    });
+    await sendMessage(env, chatId, "نام شهرستان را وارد کنید؛ مثلاً «تهران» یا «شیراز».");
+    return true;
+  }
+  if (flow.state === "awaiting_county") {
+    if (value.length < 2 || value.length > 50) {
+      await sendMessage(env, chatId, "نام شهرستان باید بین ۲ تا ۵۰ نویسه باشد.");
+      return true;
+    }
+    await setSpecialLookupFlow(env.DB, telegramUserId, chatId, "awaiting_label", {
+      county: value,
+    });
+    await sendMessage(env, chatId, "یک نام دلخواه برای این اشتراک وارد کنید؛ مثلاً «خانه» یا «مغازه».");
+    return true;
+  }
+  if (flow.state === "awaiting_label") {
+    if (value.length < 2 || value.length > 30) {
+      await sendMessage(env, chatId, "نام اشتراک باید بین ۲ تا ۳۰ نویسه باشد.");
+      return true;
+    }
+    await setSpecialLookupFlow(env.DB, telegramUserId, chatId, "awaiting_bill_id", {
+      request_label: value,
+    });
+    await sendMessage(
+      env,
+      chatId,
+      "شناسه قبض را فقط به‌صورت عدد ارسال کنید. مقدار کامل رمزگذاری می‌شود و در فهرست‌ها نمایش داده نخواهد شد.",
+    );
+    return true;
+  }
+  if (flow.state === "awaiting_bill_id") {
+    try {
+      const protectedValue = await protectBillId(env, text);
+      await setSpecialLookupFlow(env.DB, telegramUserId, chatId, "confirm_submit", {
+        bill_id_ciphertext: protectedValue.ciphertext,
+        bill_id_hash: protectedValue.hash,
+        bill_id_last4: protectedValue.last4,
+      });
+      const updated = await getSpecialLookupFlow(env.DB, telegramUserId);
+      if (!updated) throw new Error("اطلاعات درخواست منقضی شد.");
+      await sendMessage(
+        env,
+        chatId,
+        [
+          "⚠️ <b>تأیید ارسال اطلاعات حساس</b>",
+          `🏷 <b>نام:</b> ${escapeHtml(updated.request_label)}`,
+          `🗺 <b>استان:</b> ${escapeHtml(updated.province)}`,
+          `🏙 <b>شهرستان:</b> ${escapeHtml(updated.county)}`,
+          `🧾 <b>شناسه قبض:</b> <code>${maskBillId(updated.bill_id_last4)}</code>`,
+          "",
+          "این اطلاعات برای بررسی امکان اتصال به سامانه رسمی برق در اختیار مدیر ربات قرار می‌گیرد.",
+        ].join("\n"),
+        {
+          inline_keyboard: [
+            [
+              { text: "✅ تأیید و ارسال", callback_data: SPECIAL_SUBMIT_CALLBACK },
+              { text: "❌ انصراف", callback_data: SPECIAL_CANCEL_CALLBACK },
+            ],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
+      );
+    } catch (error) {
+      await sendMessage(
+        env,
+        chatId,
+        `⚠️ ${escapeHtml(error instanceof Error ? error.message : "شناسه قبض نامعتبر است.")}`,
+      );
+    }
+    return true;
+  }
+  if (flow.state === "confirm_submit") {
+    await sendMessage(env, chatId, "برای ارسال یا لغو، یکی از دکمه‌های پیام تأیید را بزنید.");
+    return true;
+  }
+  return false;
+}
+
+async function openAdminSpecialRequests(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  if (!isAdmin(env, telegramUserId)) {
+    await sendMessage(env, chatId, "دسترسی مدیریت برای این حساب فعال نیست.");
+    return;
+  }
+  const requests = await listSpecialLookupRequests(env.DB, "pending", 50);
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = requests.map((request) => [
+    {
+      text: `${request.province} / ${request.county} / ${request.request_label}`.slice(0, 55),
+      callback_data: `${ADMIN_SPECIAL_SHOW_PREFIX}${request.request_id}`,
+    },
+  ]);
+  rows.push([{ text: "🔄 تازه‌سازی", callback_data: ADMIN_SPECIAL_CALLBACK }]);
+  rows.push([{ text: "⬅️ پنل مدیریت", callback_data: ADMIN_HOME_CALLBACK }]);
+  rows.push([{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }]);
+  await sendMessage(
+    env,
+    chatId,
+    requests.length
+      ? `⭐ <b>درخواست‌های ویژه</b>\n\n${toPersianDigits(requests.length)} درخواست در انتظار بررسی است.`
+      : "⭐ <b>درخواست‌های ویژه</b>\n\nدرخواست در انتظاری وجود ندارد.",
+    { inline_keyboard: rows },
+  );
+}
+
+async function showAdminSpecialRequest(
+  env: Env,
+  chatId: string,
+  requestId: string,
+): Promise<void> {
+  const request = await getSpecialLookupRequest(env.DB, requestId);
+  if (!request) {
+    await sendMessage(env, chatId, "درخواست پیدا نشد.", adminMenuKeyboard());
+    return;
+  }
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "⭐ <b>بررسی درخواست ویژه</b>",
+      `👤 <b>کاربر:</b> <code>${request.telegram_user_id}</code>`,
+      specialRequestSummary(request),
+      "",
+      "تأیید این مرحله فقط یعنی درخواست از نظر شما قابل پیگیری است. اتصال خودکار بعد از ساخت Adapter همان سامانه آغاز می‌شود.",
+    ].join("\n"),
+    {
+      inline_keyboard: [
+        [
+          {
+            text: "🔐 نمایش شناسه کامل",
+            callback_data: `${ADMIN_SPECIAL_REVEAL_PREFIX}${request.request_id}`,
+          },
+        ],
+        [
+          {
+            text: "✅ قابل پیگیری است",
+            callback_data: `${ADMIN_SPECIAL_APPROVE_PREFIX}${request.request_id}`,
+          },
+          {
+            text: "❌ امکان‌پذیر نیست",
+            callback_data: `${ADMIN_SPECIAL_REJECT_PREFIX}${request.request_id}`,
+          },
+        ],
+        [{ text: "⬅️ درخواست‌ها", callback_data: ADMIN_SPECIAL_CALLBACK }],
+        [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+      ],
+    },
+  );
+}
+
+async function openSupportHome(env: Env, chatId: string): Promise<void> {
+  const tetherAvailable = Boolean(env.SUPPORT_USDT_ADDRESS?.trim());
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [
+    [
+      { text: "⭐ ۲۵ استار", callback_data: `${SUPPORT_STARS_PREFIX}25` },
+      { text: "⭐ ۵۰ استار", callback_data: `${SUPPORT_STARS_PREFIX}50` },
+    ],
+    [
+      { text: "⭐ ۱۰۰ استار", callback_data: `${SUPPORT_STARS_PREFIX}100` },
+      { text: "⭐ ۲۵۰ استار", callback_data: `${SUPPORT_STARS_PREFIX}250` },
+    ],
+  ];
+  if (tetherAvailable) {
+    rows.push([{ text: "₮ حمایت با تتر", callback_data: SUPPORT_TETHER_CALLBACK }]);
+  }
+  rows.push([{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }]);
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "💛 <b>حمایت از پروژه</b>",
+      "",
+      "حمایت کاملاً داوطلبانه است و دسترسی ویژه یا نتیجه استعلام را تغییر نمی‌دهد.",
+      "پرداخت با Stars داخل تلگرام خودکار تأیید می‌شود.",
+      tetherAvailable
+        ? "پرداخت تتر پس از ثبت هش تراکنش، دستی توسط مدیر تأیید می‌شود."
+        : "درگاه تتر فعلاً تنظیم نشده است.",
+    ].join("\n"),
+    { inline_keyboard: rows },
+  );
+}
+
+async function sendStarInvoice(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+  amount: number,
+): Promise<void> {
+  const payload = `support:${telegramUserId}:${amount}:${crypto.randomUUID().slice(0, 8)}`;
+  await callTelegram(env, "sendInvoice", {
+    chat_id: chatId,
+    title: "حمایت از BBS برق",
+    description: "حمایت داوطلبانه از نگهداری و توسعه ربات خاموشی",
+    payload,
+    currency: "XTR",
+    prices: [{ label: "حمایت", amount }],
+  });
+}
+
+async function handlePreCheckoutQuery(
+  env: Env,
+  query: TelegramPreCheckoutQuery,
+): Promise<void> {
+  const valid =
+    query.currency === "XTR" &&
+    Number.isInteger(query.total_amount) &&
+    [25, 50, 100, 250].includes(query.total_amount) &&
+    query.invoice_payload.startsWith(`support:${query.from.id}:`);
+  await callTelegram(env, "answerPreCheckoutQuery", {
+    pre_checkout_query_id: query.id,
+    ok: valid,
+    ...(valid ? {} : { error_message: "اطلاعات پرداخت معتبر نیست. دوباره از منوی حمایت اقدام کنید." }),
+  });
+}
+
+async function handleSuccessfulSupportPayment(
+  env: Env,
+  message: TelegramMessage,
+): Promise<void> {
+  const payment = message.successful_payment;
+  const telegramUserId = message.from ? String(message.from.id) : "";
+  const chatId = String(message.chat.id);
+  if (!payment || !telegramUserId || payment.currency !== "XTR") return;
+  const inserted = await recordStarSupportPayment(env.DB, {
+    telegramUserId,
+    chatId,
+    amount: payment.total_amount,
+    invoicePayload: payment.invoice_payload,
+    telegramChargeId: payment.telegram_payment_charge_id,
+    providerChargeId: payment.provider_payment_charge_id,
+  });
+  if (inserted) {
+    await sendMessage(
+      env,
+      chatId,
+      `💛 حمایت شما با ${toPersianDigits(payment.total_amount)} استار با موفقیت ثبت شد. واقعاً ممنونم.`,
+      mainMenuFor(env, telegramUserId),
+    );
+  }
+}
+
+async function beginTetherSupport(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  const address = env.SUPPORT_USDT_ADDRESS?.trim();
+  const network = env.SUPPORT_USDT_NETWORK?.trim() || "TRC20";
+  if (!address) {
+    await sendMessage(env, chatId, "درگاه تتر هنوز تنظیم نشده است.");
+    return;
+  }
+  await setSupportFlow(env.DB, telegramUserId, chatId, "awaiting_amount");
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "₮ <b>حمایت با تتر</b>",
+      `🌐 <b>شبکه:</b> ${escapeHtml(network)}`,
+      `📮 <b>آدرس:</b> <code>${escapeHtml(address)}</code>`,
+      "",
+      "شبکه مبدأ و مقصد باید دقیقاً یکسان باشد. ابتدا مقدار ارسالی را بنویسید؛ مثلاً <code>5 USDT</code>.",
+    ].join("\n"),
+    {
+      keyboard: [[{ text: CANCEL_BUTTON }, { text: MAIN_MENU_BUTTON }]],
+      resize_keyboard: true,
+      is_persistent: true,
+    },
+  );
+}
+
+async function handleSupportTextFlow(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+  text: string,
+): Promise<boolean> {
+  const flow = await getSupportFlow(env.DB, telegramUserId);
+  if (!flow) return false;
+  if (text === CANCEL_BUTTON || text === MAIN_MENU_BUTTON) {
+    await clearSupportFlow(env.DB, telegramUserId);
+    if (text === MAIN_MENU_BUTTON) {
+      await sendMessage(env, chatId, "یک گزینه را انتخاب کنید:", mainMenuFor(env, telegramUserId));
+    } else {
+      await openSupportHome(env, chatId);
+    }
+    return true;
+  }
+  if (flow.state === "awaiting_amount") {
+    const amount = text.trim().slice(0, 40);
+    if (!/\d/.test(normalizeDigits(amount))) {
+      await sendMessage(env, chatId, "مقدار باید شامل عدد باشد؛ مثلاً <code>5 USDT</code>.");
+      return true;
+    }
+    await setSupportFlow(env.DB, telegramUserId, chatId, "awaiting_tx_hash", amount);
+    await sendMessage(env, chatId, "حالا هش تراکنش (TXID) را ارسال کنید.");
+    return true;
+  }
+  if (flow.state === "awaiting_tx_hash") {
+    try {
+      const submission = await createTetherSubmission(env.DB, {
+        telegramUserId,
+        chatId,
+        network: env.SUPPORT_USDT_NETWORK?.trim() || "TRC20",
+        amountText: flow.amount_text,
+        txHash: text,
+      });
+      await clearSupportFlow(env.DB, telegramUserId);
+      await sendMessage(
+        env,
+        chatId,
+        "✅ هش تراکنش ثبت شد و پس از بررسی مدیر نتیجه اعلام می‌شود.",
+        mainMenuFor(env, telegramUserId),
+      );
+      const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim();
+      if (adminId) {
+        await sendMessage(
+          env,
+          adminId,
+          [
+            "₮ <b>حمایت تتر در انتظار بررسی</b>",
+            `👤 <b>کاربر:</b> <code>${telegramUserId}</code>`,
+            `🌐 <b>شبکه:</b> ${escapeHtml(submission.network)}`,
+            `💵 <b>مقدار اعلامی:</b> ${escapeHtml(submission.amount_text)}`,
+            `🔗 <b>TXID:</b> <code>${escapeHtml(submission.tx_hash)}</code>`,
+          ].join("\n"),
+          {
+            inline_keyboard: [
+              [
+                { text: "✅ تأیید", callback_data: `${SUPPORT_TETHER_APPROVE_PREFIX}${submission.submission_id}` },
+                { text: "❌ رد", callback_data: `${SUPPORT_TETHER_REJECT_PREFIX}${submission.submission_id}` },
+              ],
+              [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+            ],
+          },
+        );
+      }
+    } catch (error) {
+      await sendMessage(env, chatId, `⚠️ ${escapeHtml(error instanceof Error ? error.message : "ثبت تراکنش ناموفق بود.")}`);
+    }
+    return true;
+  }
+  return false;
+}
+
 async function sendOutageResults(
   env: Env,
   chatId: string,
@@ -457,7 +1027,7 @@ export async function setTelegramWebhook(
   return callTelegram(env, "setWebhook", {
     url: webhookUrl,
     secret_token: env.TELEGRAM_WEBHOOK_SECRET,
-    allowed_updates: ["message", "callback_query"],
+    allowed_updates: ["message", "callback_query", "pre_checkout_query"],
     drop_pending_updates: true,
   });
 }
@@ -1365,6 +1935,11 @@ async function openAdminCities(
   const cities = await listManagedCities(env.DB);
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [
     [{ text: "➕ افزودن شهر", callback_data: ADMIN_CITY_ADD_CALLBACK }],
+    [
+      { text: "🔄 Fetch کامل الان", callback_data: ADMIN_MANUAL_FETCH_CALLBACK },
+      { text: "🔎 کشف شهرهای منتظر", callback_data: ADMIN_DISCOVER_PENDING_CALLBACK },
+    ],
+    [{ text: "🌐 کشف همه شهرهای Maztozi", callback_data: ADMIN_DISCOVER_ALL_CALLBACK }],
   ];
   for (const city of cities) {
     rows.push([
@@ -1396,6 +1971,7 @@ async function openAdminCities(
       details,
       "",
       "برای تغییر شماره‌ها روی نام شهر بزنید. غیرفعال‌سازی، شهر را از منو و Fetch حذف می‌کند ولی تاریخچه و پروفایل‌ها را پاک نمی‌کند.",
+      "کشف و Fetch دستی فقط با درخواست شما اجرا می‌شود و هر بار تأیید جداگانه دارد.",
     ].join("\n"),
     { inline_keyboard: rows },
   );
@@ -1516,7 +2092,7 @@ async function handleAdminTextFlow(
     await sendMessage(
       env,
       chatId,
-      "شماره‌های منبع را چگونه دریافت کنیم؟\n\nکشف خودکار در اجرای بعدی Fetch، سایت Maztozi را با مرورگر باز می‌کند و شماره‌ها را استخراج می‌کند. نتیجه قبل از فعال‌سازی برای تأیید شما ارسال می‌شود.",
+      "شماره‌های منبع را چگونه دریافت کنیم؟\n\nکشف خودکار فقط وقتی خودتان دکمه اجرای کشف را بزنید، سایت Maztozi را با مرورگر باز می‌کند و شماره‌ها را استخراج می‌کند. نتیجه قبل از فعال‌سازی برای تأیید شما ارسال می‌شود.",
       adminSourceModeKeyboard(),
     );
     return true;
@@ -1664,6 +2240,7 @@ async function openAdminSystemStatus(
       [{ text: "🔄 تازه‌سازی وضعیت", callback_data: ADMIN_STATUS_CALLBACK }],
       [{ text: "👥 مدیریت کاربران", callback_data: ADMIN_REFRESH_CALLBACK }],
       [{ text: "🏙 مدیریت شهرها", callback_data: ADMIN_CITIES_CALLBACK }],
+      [{ text: "⭐ درخواست‌های ویژه", callback_data: ADMIN_SPECIAL_CALLBACK }],
       [{ text: "⬅️ پنل مدیریت", callback_data: ADMIN_HOME_CALLBACK }],
       [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
     ],
@@ -1683,6 +2260,10 @@ async function openAdminSystemStatus(
       `🔔 <b>اعلان روزانه در ۲۴ ساعت:</b> ${toPersianDigits(stats.daily_notifications_24h)}`,
       `🔄 <b>اعلان تغییر در ۲۴ ساعت:</b> ${toPersianDigits(stats.change_notifications_24h)}`,
       `⏰ <b>یادآوری در ۲۴ ساعت:</b> ${toPersianDigits(stats.reminders_24h)}`,
+      `⭐ <b>درخواست ویژه در انتظار:</b> ${toPersianDigits(stats.pending_special_requests)}`,
+      `💛 <b>مجموع حمایت Stars:</b> ${toPersianDigits(stats.support_stars_total)}`,
+      `₮ <b>تتر در انتظار تأیید:</b> ${toPersianDigits(stats.pending_tether_submissions)}`,
+      `🧰 <b>عملیات دستی در ۲۴ ساعت:</b> ${toPersianDigits(stats.manual_operations_24h)}`,
       `🗄 <b>رکوردهای آرشیو:</b> ${toPersianDigits(stats.archived_outages)}`,
       `🔢 <b>مشاهدات شماره خاموشی:</b> ${toPersianDigits(stats.outage_number_observations)}`,
       staleCities.length > 0
@@ -2048,6 +2629,8 @@ async function handleCallbackQuery(
     if (telegramUserId) {
       await clearAdminFlow(env.DB, telegramUserId);
       await clearPersonalizationFlow(env.DB, telegramUserId);
+      await clearSpecialLookupFlow(env.DB, telegramUserId);
+      await clearSupportFlow(env.DB, telegramUserId);
     }
     await answerCallbackQuery(env, callbackQuery.id, "منوی اصلی");
     await sendMessage(
@@ -2067,6 +2650,20 @@ async function handleCallbackQuery(
     data === ADMIN_CITY_ADD_CALLBACK ||
     data === ADMIN_CITY_SAVE_CONFIRM_CALLBACK ||
     data === ADMIN_CITY_DISCOVERY_CONFIRM_CALLBACK ||
+    data === ADMIN_MANUAL_FETCH_CALLBACK ||
+    data === ADMIN_DISCOVER_PENDING_CALLBACK ||
+    data === ADMIN_DISCOVER_ALL_CALLBACK ||
+    data === ADMIN_SPECIAL_CALLBACK ||
+    data.startsWith(ADMIN_OPERATION_CONFIRM_PREFIX) ||
+    data.startsWith(ADMIN_BULK_ACCEPT_PREFIX) ||
+    data.startsWith(ADMIN_BULK_REJECT_PREFIX) ||
+    data.startsWith(ADMIN_SPECIAL_SHOW_PREFIX) ||
+    data.startsWith(ADMIN_SPECIAL_APPROVE_PREFIX) ||
+    data.startsWith(ADMIN_SPECIAL_REJECT_PREFIX) ||
+    data.startsWith(ADMIN_SPECIAL_REVEAL_PREFIX) ||
+    data.startsWith(ADMIN_SPECIAL_REVEAL_CONFIRM_PREFIX) ||
+    data.startsWith(SUPPORT_TETHER_APPROVE_PREFIX) ||
+    data.startsWith(SUPPORT_TETHER_REJECT_PREFIX) ||
     data.startsWith(ADMIN_REVOKE_PREFIX) ||
     data.startsWith(ADMIN_REVOKE_CONFIRM_PREFIX) ||
     data.startsWith(ADMIN_CITY_EDIT_PREFIX) ||
@@ -2113,6 +2710,276 @@ async function handleCallbackQuery(
       await openAdminCities(env, chatId, telegramUserId);
       return;
     }
+    if (data === ADMIN_SPECIAL_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "درخواست‌های ویژه");
+      await openAdminSpecialRequests(env, chatId, telegramUserId);
+      return;
+    }
+    if (
+      data === ADMIN_MANUAL_FETCH_CALLBACK ||
+      data === ADMIN_DISCOVER_PENDING_CALLBACK ||
+      data === ADMIN_DISCOVER_ALL_CALLBACK
+    ) {
+      const operation: ManualOperationType = data === ADMIN_MANUAL_FETCH_CALLBACK
+        ? "fetch"
+        : data === ADMIN_DISCOVER_PENDING_CALLBACK
+          ? "discover_pending"
+          : "discover_all";
+      await answerCallbackQuery(env, callbackQuery.id);
+      await showManualOperationConfirmation(env, chatId, operation);
+      return;
+    }
+    if (data.startsWith(ADMIN_OPERATION_CONFIRM_PREFIX)) {
+      const candidate = data.slice(ADMIN_OPERATION_CONFIRM_PREFIX.length);
+      if (!["fetch", "discover_pending", "discover_all"].includes(candidate)) {
+        await answerCallbackQuery(env, callbackQuery.id, "عملیات نامعتبر است.", true);
+        return;
+      }
+      const operation = candidate as ManualOperationType;
+      await answerCallbackQuery(env, callbackQuery.id, "در حال ارسال به GitHub Actions…");
+      try {
+        const result = await dispatchManualOperation(env, operation, telegramUserId);
+        await sendMessage(
+          env,
+          chatId,
+          [
+            "✅ <b>عملیات در صف اجرا قرار گرفت</b>",
+            `نوع: ${manualOperationLabel(operation)}`,
+            `شناسه: <code>${result.operationId}</code>`,
+            "",
+            "اگر Runner روشن باشد، اجرا معمولاً ظرف چند ثانیه شروع می‌شود و پایان کار در همین چت اعلام خواهد شد.",
+          ].join("\n"),
+          adminMenuKeyboard(),
+        );
+      } catch (error) {
+        await sendMessage(
+          env,
+          chatId,
+          `⚠️ اجرای عملیات ممکن نشد:
+${escapeHtml(error instanceof Error ? error.message : "خطای نامشخص")}`,
+          adminMenuKeyboard(),
+        );
+      }
+      return;
+    }
+    if (data.startsWith(ADMIN_BULK_ACCEPT_PREFIX)) {
+      const batchId = data.slice(ADMIN_BULK_ACCEPT_PREFIX.length);
+      const batch = await getBulkDiscoveryBatch(env.DB, batchId);
+      if (!batch || batch.status !== "pending") {
+        await answerCallbackQuery(env, callbackQuery.id, "این پیشنهاد دیگر قابل اعمال نیست.", true);
+        return;
+      }
+      await answerCallbackQuery(env, callbackQuery.id, "در حال اعمال موارد سالم…");
+      try {
+        const result = await applyBulkDiscoveryBatch(env.DB, batchId);
+        await sendMessage(
+          env,
+          chatId,
+          `✅ ${toPersianDigits(result.applied)} شهر ذخیره یا به‌روزرسانی شد. ${toPersianDigits(result.skipped)} مورد دارای خطا یا تداخل اعمال نشد.\n\nبرای دریافت خاموشی شهرهای جدید، «Fetch کامل الان» را بزنید.`,
+          adminMenuKeyboard(),
+        );
+        await openAdminCities(env, chatId, telegramUserId);
+      } catch (error) {
+        await sendMessage(env, chatId, `⚠️ اعمال دسته‌ای ناموفق بود: ${escapeHtml(error instanceof Error ? error.message : "خطای نامشخص")}`);
+      }
+      return;
+    }
+    if (data.startsWith(ADMIN_BULK_REJECT_PREFIX)) {
+      const batchId = data.slice(ADMIN_BULK_REJECT_PREFIX.length);
+      await rejectBulkDiscoveryBatch(env.DB, batchId);
+      await answerCallbackQuery(env, callbackQuery.id, "نتیجه کشف رد شد.");
+      await openAdminCities(env, chatId, telegramUserId);
+      return;
+    }
+    if (data.startsWith(ADMIN_SPECIAL_REVEAL_CONFIRM_PREFIX)) {
+      const requestId = data.slice(ADMIN_SPECIAL_REVEAL_CONFIRM_PREFIX.length);
+      const request = await getSpecialLookupRequest(env.DB, requestId);
+      if (!request) {
+        await answerCallbackQuery(env, callbackQuery.id, "درخواست پیدا نشد.", true);
+        return;
+      }
+      await answerCallbackQuery(env, callbackQuery.id, "شناسه نمایش داده شد.");
+      try {
+        const billId = await revealBillId(env, request.bill_id_ciphertext);
+        await sendMessage(
+          env,
+          chatId,
+          [
+            "🔐 <b>شناسه قبض کامل</b>",
+            `🗺 ${escapeHtml(request.province)} / ${escapeHtml(request.county)}`,
+            `🧾 <code>${escapeHtml(billId)}</code>`,
+            "",
+            "این پیام حاوی اطلاعات حساس است؛ آن را برای شخص دیگری ارسال نکنید.",
+          ].join("\n"),
+          {
+            inline_keyboard: [
+              [{ text: "⬅️ بازگشت به درخواست", callback_data: `${ADMIN_SPECIAL_SHOW_PREFIX}${requestId}` }],
+              [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+            ],
+          },
+        );
+      } catch (error) {
+        await sendMessage(env, chatId, `⚠️ رمزگشایی ناموفق بود: ${escapeHtml(error instanceof Error ? error.message : "خطای نامشخص")}`);
+      }
+      return;
+    }
+    if (data.startsWith(ADMIN_SPECIAL_REVEAL_PREFIX)) {
+      const requestId = data.slice(ADMIN_SPECIAL_REVEAL_PREFIX.length);
+      await answerCallbackQuery(env, callbackQuery.id);
+      await sendMessage(
+        env,
+        chatId,
+        "⚠️ <b>تأیید نمایش اطلاعات حساس</b>\n\nشناسه کامل در تاریخچه همین گفت‌وگوی خصوصی نمایش داده می‌شود. ادامه می‌دهید؟",
+        {
+          inline_keyboard: [
+            [
+              { text: "✅ بله، نمایش بده", callback_data: `${ADMIN_SPECIAL_REVEAL_CONFIRM_PREFIX}${requestId}` },
+              { text: "❌ انصراف", callback_data: `${ADMIN_SPECIAL_SHOW_PREFIX}${requestId}` },
+            ],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
+      );
+      return;
+    }
+    if (data.startsWith(ADMIN_SPECIAL_SHOW_PREFIX)) {
+      const requestId = data.slice(ADMIN_SPECIAL_SHOW_PREFIX.length);
+      await answerCallbackQuery(env, callbackQuery.id, "نمایش درخواست");
+      await showAdminSpecialRequest(env, chatId, requestId);
+      return;
+    }
+    if (
+      data.startsWith(ADMIN_SPECIAL_APPROVE_CONFIRM_PREFIX) ||
+      data.startsWith(ADMIN_SPECIAL_REJECT_CONFIRM_PREFIX)
+    ) {
+      const approved = data.startsWith(ADMIN_SPECIAL_APPROVE_CONFIRM_PREFIX);
+      const prefix = approved
+        ? ADMIN_SPECIAL_APPROVE_CONFIRM_PREFIX
+        : ADMIN_SPECIAL_REJECT_CONFIRM_PREFIX;
+      const requestId = data.slice(prefix.length);
+      const request = await decideSpecialLookupRequest(
+        env.DB,
+        requestId,
+        approved ? "approved" : "rejected",
+      );
+      await answerCallbackQuery(env, callbackQuery.id, approved ? "درخواست پذیرفته شد." : "درخواست رد شد.");
+      await sendMessage(
+        env,
+        request.chat_id,
+        approved
+          ? `✅ درخواست ویژه «${escapeHtml(request.request_label)}» برای بررسی و اتصال فنی پذیرفته شد. پس از آماده‌شدن سامانه ارائه‌دهنده، فعال‌شدن اعلان‌ها جداگانه اطلاع داده می‌شود.`
+          : `❌ در حال حاضر امکان پشتیبانی خودکار از درخواست «${escapeHtml(request.request_label)}» فراهم نشد.`,
+        mainMenuFor(env, request.telegram_user_id),
+      );
+      await openAdminSpecialRequests(env, chatId, telegramUserId);
+      return;
+    }
+    if (
+      data.startsWith(ADMIN_SPECIAL_APPROVE_PREFIX) ||
+      data.startsWith(ADMIN_SPECIAL_REJECT_PREFIX)
+    ) {
+      const approved = data.startsWith(ADMIN_SPECIAL_APPROVE_PREFIX);
+      const prefix = approved ? ADMIN_SPECIAL_APPROVE_PREFIX : ADMIN_SPECIAL_REJECT_PREFIX;
+      const requestId = data.slice(prefix.length);
+      const request = await getSpecialLookupRequest(env.DB, requestId);
+      if (!request || request.status !== "pending") {
+        await answerCallbackQuery(env, callbackQuery.id, "این درخواست دیگر در انتظار بررسی نیست.", true);
+        return;
+      }
+      await answerCallbackQuery(env, callbackQuery.id);
+      await sendMessage(
+        env,
+        chatId,
+        [
+          "⚠️ <b>تأیید تصمیم حساس</b>",
+          specialRequestSummary(request),
+          "",
+          approved
+            ? "درخواست برای بررسی و ساخت اتصال فنی پذیرفته شود؟ این تأیید هنوز به معنی فعال‌شدن اعلان خودکار نیست."
+            : "درخواست رد شود و به کاربر اعلام شود که فعلاً امکان پشتیبانی خودکار وجود ندارد؟",
+        ].join("\n"),
+        {
+          inline_keyboard: [
+            [
+              {
+                text: approved ? "✅ بله، بپذیر" : "✅ بله، رد کن",
+                callback_data: `${approved ? ADMIN_SPECIAL_APPROVE_CONFIRM_PREFIX : ADMIN_SPECIAL_REJECT_CONFIRM_PREFIX}${requestId}`,
+              },
+              { text: "❌ انصراف", callback_data: `${ADMIN_SPECIAL_SHOW_PREFIX}${requestId}` },
+            ],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
+      );
+      return;
+    }
+    if (
+      data.startsWith(SUPPORT_TETHER_APPROVE_CONFIRM_PREFIX) ||
+      data.startsWith(SUPPORT_TETHER_REJECT_CONFIRM_PREFIX)
+    ) {
+      const approved = data.startsWith(SUPPORT_TETHER_APPROVE_CONFIRM_PREFIX);
+      const prefix = approved
+        ? SUPPORT_TETHER_APPROVE_CONFIRM_PREFIX
+        : SUPPORT_TETHER_REJECT_CONFIRM_PREFIX;
+      const submissionId = data.slice(prefix.length);
+      const submission = await decideTetherSubmission(
+        env.DB,
+        submissionId,
+        approved ? "approved" : "rejected",
+      );
+      await answerCallbackQuery(env, callbackQuery.id, approved ? "تراکنش تأیید شد." : "تراکنش رد شد.");
+      await sendMessage(
+        env,
+        submission.chat_id,
+        approved
+          ? `💛 حمایت تتر شما با مقدار اعلامی ${escapeHtml(submission.amount_text)} تأیید شد. سپاسگزارم.`
+          : "⚠️ تراکنش تتر ثبت‌شده تأیید نشد. شبکه، آدرس و TXID را بررسی کنید.",
+        mainMenuFor(env, submission.telegram_user_id),
+      );
+      return;
+    }
+    if (
+      data.startsWith(SUPPORT_TETHER_APPROVE_PREFIX) ||
+      data.startsWith(SUPPORT_TETHER_REJECT_PREFIX)
+    ) {
+      const approved = data.startsWith(SUPPORT_TETHER_APPROVE_PREFIX);
+      const prefix = approved ? SUPPORT_TETHER_APPROVE_PREFIX : SUPPORT_TETHER_REJECT_PREFIX;
+      const submissionId = data.slice(prefix.length);
+      const submission = await getTetherSubmission(env.DB, submissionId);
+      if (!submission || submission.status !== "pending") {
+        await answerCallbackQuery(env, callbackQuery.id, "این تراکنش دیگر در انتظار بررسی نیست.", true);
+        return;
+      }
+      await answerCallbackQuery(env, callbackQuery.id);
+      await sendMessage(
+        env,
+        chatId,
+        [
+          "⚠️ <b>تأیید نتیجه پرداخت تتر</b>",
+          `🌐 <b>شبکه:</b> ${escapeHtml(submission.network)}`,
+          `💵 <b>مقدار اعلامی:</b> ${escapeHtml(submission.amount_text)}`,
+          `🔗 <b>TXID:</b> <code>${escapeHtml(submission.tx_hash)}</code>`,
+          "",
+          approved
+            ? "پس از بررسی در کیف پول یا اکسپلورر، دریافت این تراکنش را تأیید می‌کنید؟"
+            : "این تراکنش رد شود و به کاربر هشدار داده شود؟",
+        ].join("\n"),
+        {
+          inline_keyboard: [
+            [
+              {
+                text: approved ? "✅ بله، دریافت شد" : "✅ بله، رد شود",
+                callback_data: `${approved ? SUPPORT_TETHER_APPROVE_CONFIRM_PREFIX : SUPPORT_TETHER_REJECT_CONFIRM_PREFIX}${submissionId}`,
+              },
+              { text: "❌ انصراف", callback_data: ADMIN_HOME_CALLBACK },
+            ],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
+      );
+      return;
+    }
+
     if (data === ADMIN_CITY_ADD_CALLBACK) {
       await answerCallbackQuery(env, callbackQuery.id, "افزودن شهر");
       await beginAdminAddCity(env, chatId, telegramUserId);
@@ -2259,8 +3126,14 @@ async function handleCallbackQuery(
       await sendMessage(
         env,
         chatId,
-        "✅ درخواست ثبت شد. در اجرای بعدی Fetch، مرورگر خودکار شماره‌های Maztozi را استخراج می‌کند. نتیجه برای تأیید نهایی به همین چت ارسال می‌شود.",
-        adminMenuKeyboard(),
+        "✅ درخواست ثبت شد. برای اجرای فوری، دکمه «کشف الان» را بزنید. نتیجه برای تأیید نهایی به همین چت ارسال می‌شود.",
+        {
+          inline_keyboard: [
+            [{ text: "🔎 کشف الان", callback_data: ADMIN_DISCOVER_PENDING_CALLBACK }],
+            [{ text: "🏙 مدیریت شهرها", callback_data: ADMIN_CITIES_CALLBACK }],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
       );
       return;
     }
@@ -2309,6 +3182,81 @@ async function handleCallbackQuery(
     await answerCallbackQuery(env, callbackQuery.id, "این بخش فقط در گفت‌وگوی خصوصی فعال است.", true);
     return;
   }
+  const specialAction =
+    data === SPECIAL_HOME_CALLBACK ||
+    data === SPECIAL_ADD_CALLBACK ||
+    data === SPECIAL_SUBMIT_CALLBACK ||
+    data === SPECIAL_CANCEL_CALLBACK;
+  if (specialAction) {
+    const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
+    if (!authorized) {
+      await answerCallbackQuery(env, callbackQuery.id);
+      return;
+    }
+    if (data === SPECIAL_HOME_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "درخواست‌های ویژه");
+      await openSpecialLookupHome(env, chatId, telegramUserId);
+      return;
+    }
+    if (data === SPECIAL_ADD_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "ثبت درخواست جدید");
+      await beginSpecialLookupRequest(env, chatId, telegramUserId);
+      return;
+    }
+    if (data === SPECIAL_CANCEL_CALLBACK) {
+      await clearSpecialLookupFlow(env.DB, telegramUserId);
+      await answerCallbackQuery(env, callbackQuery.id, "درخواست لغو شد.");
+      await openSpecialLookupHome(env, chatId, telegramUserId);
+      return;
+    }
+    const flow = await getSpecialLookupFlow(env.DB, telegramUserId);
+    if (!flow || flow.state !== "confirm_submit") {
+      await answerCallbackQuery(env, callbackQuery.id, "اطلاعات درخواست منقضی شده است.", true);
+      return;
+    }
+    try {
+      const request = await createSpecialLookupRequest(env.DB, flow);
+      await clearSpecialLookupFlow(env.DB, telegramUserId);
+      await answerCallbackQuery(env, callbackQuery.id, "درخواست ارسال شد.");
+      await sendMessage(
+        env,
+        chatId,
+        "✅ درخواست ویژه ثبت شد. پس از بررسی سامانه رسمی استان، نتیجه توسط مدیر اعلام می‌شود.",
+        mainMenuFor(env, telegramUserId),
+      );
+      await notifyAdminSpecialRequest(env, request);
+    } catch (error) {
+      await answerCallbackQuery(env, callbackQuery.id, "ثبت درخواست ناموفق بود.", true);
+      await sendMessage(env, chatId, `⚠️ ${escapeHtml(error instanceof Error ? error.message : "خطای نامشخص")}`);
+    }
+    return;
+  }
+
+  const supportAction =
+    data === SUPPORT_HOME_CALLBACK ||
+    data === SUPPORT_TETHER_CALLBACK ||
+    data.startsWith(SUPPORT_STARS_PREFIX);
+  if (supportAction) {
+    if (data === SUPPORT_HOME_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "حمایت از پروژه");
+      await openSupportHome(env, chatId);
+      return;
+    }
+    if (data === SUPPORT_TETHER_CALLBACK) {
+      await answerCallbackQuery(env, callbackQuery.id, "حمایت با تتر");
+      await beginTetherSupport(env, chatId, telegramUserId);
+      return;
+    }
+    const amount = Number(data.slice(SUPPORT_STARS_PREFIX.length));
+    if (![25, 50, 100, 250].includes(amount)) {
+      await answerCallbackQuery(env, callbackQuery.id, "مقدار استار نامعتبر است.", true);
+      return;
+    }
+    await answerCallbackQuery(env, callbackQuery.id, "فاکتور ارسال شد.");
+    await sendStarInvoice(env, chatId, telegramUserId, amount);
+    return;
+  }
+
   const personalAction =
     data === PERSONAL_ADD_CALLBACK ||
     data === PERSONAL_DASHBOARD_CALLBACK ||
@@ -2411,6 +3359,8 @@ async function handleTextMessage(
     if (telegramUserId) {
       await clearPersonalizationFlow(env.DB, telegramUserId);
       await clearAdminFlow(env.DB, telegramUserId);
+      await clearSpecialLookupFlow(env.DB, telegramUserId);
+      await clearSupportFlow(env.DB, telegramUserId);
     }
     await sendMessage(
       env,
@@ -2433,6 +3383,44 @@ async function handleTextMessage(
     return;
   }
 
+  if (text === "/support") {
+    await sendMessage(
+      env,
+      chatId,
+      env.SUPPORT_CONTACT?.trim()
+        ? `راه ارتباط با پشتیبانی: ${escapeHtml(env.SUPPORT_CONTACT.trim())}`
+        : "راه ارتباط پشتیبانی هنوز تنظیم نشده است.",
+      mainMenuFor(env, telegramUserId),
+    );
+    return;
+  }
+
+  if (text === "/terms") {
+    await sendMessage(
+      env,
+      chatId,
+      [
+        "📄 <b>شرایط استفاده و حمایت</b>",
+        "",
+        "این ربات یک ابزار اطلاع‌رسانی کمکی است و جایگزین اطلاعیه رسمی شرکت توزیع برق نیست.",
+        "حمایت با Stars یا تتر کاملاً داوطلبانه است و دسترسی ویژه، اولویت بررسی یا تضمین سرویس ایجاد نمی‌کند.",
+        "برای مشکل پرداخت از دستور /paysupport و برای پشتیبانی عمومی از /support استفاده کنید.",
+      ].join("\n"),
+      mainMenuFor(env, telegramUserId),
+    );
+    return;
+  }
+
+  if (text === "/paysupport") {
+    await sendMessage(
+      env,
+      chatId,
+      `برای پیگیری پرداخت، شناسه عددی خود و توضیح مشکل را برای پشتیبانی ارسال کنید.${env.SUPPORT_CONTACT?.trim() ? `\nپشتیبانی: ${escapeHtml(env.SUPPORT_CONTACT.trim())}` : ""}`,
+      mainMenuFor(env, telegramUserId),
+    );
+    return;
+  }
+
   if (telegramUser && telegramUserId && isAdmin(env, telegramUserId)) {
     const handled = await handleAdminTextFlow(
       env,
@@ -2441,6 +3429,23 @@ async function handleTextMessage(
       text,
     );
     if (handled) return;
+  }
+
+  if (telegramUser && telegramUserId) {
+    const specialHandled = await handleSpecialLookupTextFlow(
+      env,
+      chatId,
+      telegramUserId,
+      text,
+    );
+    if (specialHandled) return;
+    const supportHandled = await handleSupportTextFlow(
+      env,
+      chatId,
+      telegramUserId,
+      text,
+    );
+    if (supportHandled) return;
   }
 
   if (telegramUser && telegramUserId) {
@@ -2478,6 +3483,32 @@ async function handleTextMessage(
   if (text === ADMIN_CITIES_BUTTON) {
     if (!telegramUserId) return;
     await openAdminCities(env, chatId, telegramUserId);
+    return;
+  }
+
+  if (text === ADMIN_SPECIAL_REQUESTS_BUTTON) {
+    if (!telegramUserId) return;
+    await openAdminSpecialRequests(env, chatId, telegramUserId);
+    return;
+  }
+
+  if (text === SUPPORT_BUTTON) {
+    await openSupportHome(env, chatId);
+    return;
+  }
+
+  if (text === SPECIAL_LOOKUP_BUTTON) {
+    if (!telegramUser || !telegramUserId) {
+      await sendMessage(env, chatId, "شناسه کاربر در دسترس نیست.");
+      return;
+    }
+    if (!isPrivateConversation(message, telegramUser)) {
+      await sendMessage(env, chatId, "استعلام ویژه فقط در گفت‌وگوی خصوصی فعال است.");
+      return;
+    }
+    const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
+    if (!authorized) return;
+    await openSpecialLookupHome(env, chatId, telegramUserId);
     return;
   }
 
@@ -2618,12 +3649,23 @@ export async function handleTelegramUpdate(
     return;
   }
   try {
+    if (update.pre_checkout_query) {
+      await handlePreCheckoutQuery(env, update.pre_checkout_query);
+      return;
+    }
     if (update.callback_query) {
       await handleCallbackQuery(env, update.callback_query);
       return;
     }
     const message = update.message;
     if (!message) {
+      return;
+    }
+    if (message.successful_payment) {
+      if (message.from) {
+        await upsertTelegramUser(env.DB, message.from, String(message.chat.id));
+      }
+      await handleSuccessfulSupportPayment(env, message);
       return;
     }
     const text = message.text?.trim();

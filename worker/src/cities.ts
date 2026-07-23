@@ -1,3 +1,4 @@
+import { normalizePersianText } from "./persian";
 import type { CityConfig, D1Database } from "./types";
 
 export interface ManagedCity extends CityConfig {
@@ -315,4 +316,210 @@ export async function listPendingDiscoveryCities(
       "WHERE discovery_status = 'requested' ORDER BY discovery_requested_at"
   ).all<{ key: string; label: string }>();
   return result.results;
+}
+
+
+export interface BulkDiscoveryInputItem {
+  label: string;
+  source_city_ids: number[];
+  error?: string;
+}
+
+export interface BulkDiscoveryBatch {
+  batch_id: string;
+  payload_json: string;
+  status: string;
+  discovered_city_count: number;
+  clean_city_count: number;
+  conflict_count: number;
+  error_count: number;
+  summary_json: string;
+  created_at: string;
+  decided_at: string | null;
+}
+
+interface BulkDiscoverySummary {
+  clean: BulkDiscoveryInputItem[];
+  conflicts: Array<{ label: string; detail: string }>;
+  errors: Array<{ label: string; detail: string }>;
+}
+
+async function generatedCityKey(label: string): Promise<string> {
+  const normalized = normalizePersianText(label);
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(normalized),
+  );
+  const suffix = [...new Uint8Array(digest)]
+    .slice(0, 6)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `city_${suffix}`;
+}
+
+function normalizeBulkItems(rawItems: BulkDiscoveryInputItem[]): BulkDiscoveryInputItem[] {
+  const byLabel = new Map<string, BulkDiscoveryInputItem>();
+  for (const item of rawItems) {
+    const label = normalizePersianText(String(item.label ?? "")).slice(0, 50);
+    if (!label) continue;
+    const ids = [...new Set(
+      (Array.isArray(item.source_city_ids) ? item.source_city_ids : [])
+        .map(Number)
+        .filter((value) => Number.isInteger(value) && value > 0 && value <= 1000000),
+    )].sort((a, b) => a - b);
+    byLabel.set(label, {
+      label,
+      source_city_ids: ids,
+      error: String(item.error ?? "").trim().slice(0, 900),
+    });
+  }
+  return [...byLabel.values()].sort((a, b) => a.label.localeCompare(b.label, "fa"));
+}
+
+async function analyzeBulkDiscovery(
+  db: D1Database,
+  items: BulkDiscoveryInputItem[],
+): Promise<BulkDiscoverySummary> {
+  const clean: BulkDiscoveryInputItem[] = [];
+  const conflicts: BulkDiscoverySummary["conflicts"] = [];
+  const errors: BulkDiscoverySummary["errors"] = [];
+  const existing = await listManagedCities(db);
+  const existingByLabel = new Map(
+    existing.map((city) => [normalizePersianText(city.label), city]),
+  );
+  const labelsBySource = new Map<number, Set<string>>();
+  for (const item of items) {
+    for (const id of item.source_city_ids) {
+      const labels = labelsBySource.get(id) ?? new Set<string>();
+      labels.add(item.label);
+      labelsBySource.set(id, labels);
+    }
+  }
+
+  for (const item of items) {
+    if (item.error) {
+      errors.push({ label: item.label, detail: item.error });
+      continue;
+    }
+    if (item.source_city_ids.length === 0) {
+      errors.push({ label: item.label, detail: "هیچ شماره منبعی پیدا نشد." });
+      continue;
+    }
+    const crossLabels = item.source_city_ids
+      .filter((id) => (labelsBySource.get(id)?.size ?? 0) > 1)
+      .map((id) => `${id}: ${[...(labelsBySource.get(id) ?? [])].join(" / ")}`);
+    if (crossLabels.length > 0) {
+      conflicts.push({
+        label: item.label,
+        detail: `شماره مشترک بین چند شهر: ${crossLabels.join("، ")}`,
+      });
+      continue;
+    }
+    const existingCity = existingByLabel.get(normalizePersianText(item.label));
+    const dbConflicts = await findSourceConflicts(
+      db,
+      item.source_city_ids,
+      existingCity?.key ?? "",
+    );
+    if (dbConflicts.length > 0) {
+      conflicts.push({
+        label: item.label,
+        detail: dbConflicts
+          .map((row) => `${row.source_city_id} در ${row.city_label}`)
+          .join("، "),
+      });
+      continue;
+    }
+    clean.push(item);
+  }
+  return { clean, conflicts, errors };
+}
+
+export async function createBulkDiscoveryBatch(
+  db: D1Database,
+  rawItems: BulkDiscoveryInputItem[],
+): Promise<BulkDiscoveryBatch> {
+  const items = normalizeBulkItems(rawItems);
+  if (items.length === 0) throw new Error("No usable city discovery result was supplied.");
+  const summary = await analyzeBulkDiscovery(db, items);
+  const batchId = crypto.randomUUID().replaceAll("-", "");
+  const createdAt = new Date().toISOString();
+  await db.prepare(
+    "INSERT INTO city_discovery_bulk_batches " +
+      "(batch_id, payload_json, status, discovered_city_count, clean_city_count, " +
+      "conflict_count, error_count, summary_json, created_at) " +
+      "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+  ).bind(
+    batchId,
+    JSON.stringify(items),
+    items.length,
+    summary.clean.length,
+    summary.conflicts.length,
+    summary.errors.length,
+    JSON.stringify(summary),
+    createdAt,
+  ).run();
+  const saved = await getBulkDiscoveryBatch(db, batchId);
+  if (!saved) throw new Error("Bulk discovery batch was not saved.");
+  return saved;
+}
+
+export async function getBulkDiscoveryBatch(
+  db: D1Database,
+  batchId: string,
+): Promise<BulkDiscoveryBatch | null> {
+  return db.prepare(
+    "SELECT batch_id, payload_json, status, discovered_city_count, clean_city_count, " +
+      "conflict_count, error_count, summary_json, created_at, decided_at " +
+      "FROM city_discovery_bulk_batches WHERE batch_id = ?",
+  ).bind(batchId).first<BulkDiscoveryBatch>();
+}
+
+export function parseBulkDiscoverySummary(batch: BulkDiscoveryBatch): BulkDiscoverySummary {
+  try {
+    const parsed = JSON.parse(batch.summary_json) as BulkDiscoverySummary;
+    return {
+      clean: Array.isArray(parsed.clean) ? parsed.clean : [],
+      conflicts: Array.isArray(parsed.conflicts) ? parsed.conflicts : [],
+      errors: Array.isArray(parsed.errors) ? parsed.errors : [],
+    };
+  } catch {
+    return { clean: [], conflicts: [], errors: [] };
+  }
+}
+
+export async function applyBulkDiscoveryBatch(
+  db: D1Database,
+  batchId: string,
+): Promise<{ applied: number; skipped: number }> {
+  const batch = await getBulkDiscoveryBatch(db, batchId);
+  if (!batch || batch.status !== "pending") {
+    throw new Error("این پیشنهاد دیگر در انتظار تأیید نیست.");
+  }
+  const summary = parseBulkDiscoverySummary(batch);
+  let applied = 0;
+  for (const item of summary.clean) {
+    const existing = await findCityByLabel(db, item.label);
+    const key = existing?.key ?? await generatedCityKey(item.label);
+    await saveManagedCity(db, key, item.label, item.source_city_ids);
+    applied += 1;
+  }
+  const now = new Date().toISOString();
+  await db.prepare(
+    "UPDATE city_discovery_bulk_batches SET status = 'accepted', decided_at = ? WHERE batch_id = ?",
+  ).bind(now, batchId).run();
+  return {
+    applied,
+    skipped: summary.conflicts.length + summary.errors.length,
+  };
+}
+
+export async function rejectBulkDiscoveryBatch(
+  db: D1Database,
+  batchId: string,
+): Promise<void> {
+  await db.prepare(
+    "UPDATE city_discovery_bulk_batches SET status = 'rejected', decided_at = ? " +
+      "WHERE batch_id = ? AND status = 'pending'",
+  ).bind(new Date().toISOString(), batchId).run();
 }

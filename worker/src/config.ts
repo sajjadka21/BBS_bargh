@@ -32,10 +32,13 @@ export function getRuntimeCities(): CityConfig[] {
 export const CITIES = runtimeCities;
 export const MAZANDARAN_BUTTON = "🗺 استان مازندران";
 export const PERSONAL_OUTAGE_BUTTON = "⚡ خاموشی من";
+export const SPECIAL_LOOKUP_BUTTON = "⭐ استعلام ویژه";
+export const SUPPORT_BUTTON = "💛 حمایت از پروژه";
 export const ADMIN_PANEL_BUTTON = "🛡 مدیریت";
 export const ADMIN_STATUS_BUTTON = "📊 وضعیت سامانه";
 export const ADMIN_USERS_BUTTON = "👥 مدیریت کاربران";
 export const ADMIN_CITIES_BUTTON = "🏙 مدیریت شهرها";
+export const ADMIN_SPECIAL_REQUESTS_BUTTON = "⭐ درخواست‌های ویژه";
 export const ADMIN_ADD_CITY_BUTTON = "➕ افزودن شهر";
 export const ADMIN_AUTO_SOURCE_BUTTON = "🔎 کشف خودکار شماره‌ها";
 export const ADMIN_MANUAL_SOURCE_BUTTON = "⌨️ ورود دستی شماره‌ها";
@@ -71,7 +74,8 @@ function citySelectionRows(): ReplyKeyboardMarkup["keyboard"] {
 export function mainMenuKeyboard(isAdmin = false): ReplyKeyboardMarkup {
   const keyboard: ReplyKeyboardMarkup["keyboard"] = [
     [{ text: MAZANDARAN_BUTTON }],
-    [{ text: PERSONAL_OUTAGE_BUTTON }],
+    [{ text: PERSONAL_OUTAGE_BUTTON }, { text: SPECIAL_LOOKUP_BUTTON }],
+    [{ text: SUPPORT_BUTTON }],
   ];
   if (isAdmin) keyboard.push([{ text: ADMIN_PANEL_BUTTON }]);
   return {
@@ -88,6 +92,7 @@ export function adminMenuKeyboard(): ReplyKeyboardMarkup {
       [{ text: ADMIN_STATUS_BUTTON }],
       [{ text: ADMIN_USERS_BUTTON }],
       [{ text: ADMIN_CITIES_BUTTON }],
+      [{ text: ADMIN_SPECIAL_REQUESTS_BUTTON }],
       [{ text: MAIN_MENU_BUTTON }],
     ],
     resize_keyboard: true,

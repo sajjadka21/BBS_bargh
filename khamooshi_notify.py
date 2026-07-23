@@ -22,16 +22,6 @@ import requests
 from khamooshi_config import CITIES, OUTAGES_API_URL
 
 
-def maybe_run_pending_discovery() -> None:
-    if os.environ.get("AUTO_DISCOVER_MAZTOZI_SOURCES", "1").strip() in {"0", "false", "False"}:
-        return
-    try:
-        from discover_maztozi_sources import run_pending_discoveries
-        run_pending_discoveries()
-    except Exception as exc:
-        # Discovery is optional and must never stop the normal six-hour fetch.
-        print(f"Maztozi source discovery warning: {exc}", file=sys.stderr)
-
 
 def fetch_dynamic_cities() -> list[dict[str, Any]]:
     sync_url = required_env("WORKER_SYNC_URL").rstrip("/")
@@ -40,12 +30,22 @@ def fetch_dynamic_cities() -> list[dict[str, Any]]:
     session = requests.Session()
     session.trust_env = False
     try:
-        response = session.get(
-            f"{base_url}/fetch-config",
-            headers=headers,
-            timeout=SYNC_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
+        response = None
+        last_config_error: Exception | None = None
+        for config_path in ("/fetch-config", "/admin/fetch-config"):
+            try:
+                candidate = session.get(
+                    f"{base_url}{config_path}",
+                    headers=headers,
+                    timeout=SYNC_TIMEOUT_SECONDS,
+                )
+                candidate.raise_for_status()
+                response = candidate
+                break
+            except Exception as exc:
+                last_config_error = exc
+        if response is None:
+            raise RuntimeError(f"Worker fetch configuration is unavailable: {last_config_error}")
         body = response.json()
         cities = body.get("cities") if isinstance(body, dict) else None
         if not isinstance(cities, list) or not cities:
@@ -487,13 +487,41 @@ def post_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError(f"Could not synchronize with Worker: {last_error}")
 
 
+
+def post_manual_operation_result(ok: bool, error: str = "") -> None:
+    operation_id = os.environ.get("MANUAL_OPERATION_ID", "").strip()
+    if not operation_id:
+        return
+    sync_url = required_env("WORKER_SYNC_URL").rstrip("/")
+    base_url = sync_url[:-5] if sync_url.endswith("/sync") else sync_url
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        response = session.post(
+            f"{base_url}/admin/manual-operation-result",
+            headers={
+                "Authorization": f"Bearer {required_env('WORKER_SYNC_SECRET')}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            json={
+                "operation_id": operation_id,
+                "ok": ok,
+                "error": error[:1000],
+            },
+            timeout=SYNC_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        print(f"Could not report manual operation result: {exc}", file=sys.stderr)
+
 def main() -> None:
     iran_now = datetime.now(IRAN_TZ)
     jalali_date, api_date = persian_api_date(iran_now)
 
     print(f"Fetching Jalali date: {jalali_date}")
 
-    maybe_run_pending_discovery()
+    # City-source discovery is never coupled to the scheduled fetch. It runs
+    # only through the administrator's explicit manual GitHub Actions request.
     cities = fetch_dynamic_cities()
 
     session = requests.Session()
@@ -530,7 +558,8 @@ def main() -> None:
         )
 
     payload = {
-        "source": "github-self-hosted-fetcher",
+        "source": os.environ.get("FETCH_SOURCE", "github-self-hosted-fetcher").strip()
+        or "github-self-hosted-fetcher",
         "fetched_at": iran_now.isoformat(),
         "jalali_date": jalali_date,
         "cities": city_snapshots,
@@ -561,6 +590,12 @@ def main() -> None:
                 file=sys.stderr,
             )
 
+    post_manual_operation_result(True)
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        post_manual_operation_result(False, str(exc))
+        raise

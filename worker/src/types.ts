@@ -29,7 +29,16 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET: string;
   SYNC_SECRET: string;
   PERSONALIZATION_PASSWORD?: string;
+  ADMIN_TELEGRAM_USER_ID?: string;
   NOTIFY_CHAT_ID?: string;
+  GITHUB_ACTIONS_TOKEN?: string;
+  GITHUB_REPOSITORY?: string;
+  GITHUB_WORKFLOW_FILE?: string;
+  GITHUB_REF?: string;
+  BILL_ID_ENCRYPTION_KEY?: string;
+  SUPPORT_USDT_ADDRESS?: string;
+  SUPPORT_USDT_NETWORK?: string;
+  SUPPORT_CONTACT?: string;
 }
 
 export interface CityConfig {
@@ -161,16 +170,29 @@ export interface PersonalizationFlow {
   state: string;
   city_key: string | null;
   match_mode: PersonalMatchMode | null;
+  profile_id: string | null;
+  profile_label: string | null;
+  match_value: string | null;
   updated_at: string;
 }
 
 export interface PersonalOutageProfile {
+  profile_id: string;
   telegram_user_id: string;
+  profile_label: string;
   city_key: string;
   match_mode: PersonalMatchMode;
   match_value: string;
+  reminder_minutes: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface AuthorizedPersonalProfile extends PersonalOutageProfile {
+  chat_id: string;
+  username: string;
+  first_name: string;
+  last_name: string;
 }
 
 export interface PasswordFailureState {
@@ -182,6 +204,7 @@ export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
+  pre_checkout_query?: TelegramPreCheckoutQuery;
 }
 
 export interface TelegramUser {
@@ -199,6 +222,25 @@ export interface TelegramMessage {
   };
   from?: TelegramUser;
   text?: string;
+  successful_payment?: TelegramSuccessfulPayment;
+}
+
+
+
+export interface TelegramSuccessfulPayment {
+  currency: string;
+  total_amount: number;
+  invoice_payload: string;
+  telegram_payment_charge_id: string;
+  provider_payment_charge_id: string;
+}
+
+export interface TelegramPreCheckoutQuery {
+  id: string;
+  from: TelegramUser;
+  currency: string;
+  total_amount: number;
+  invoice_payload: string;
 }
 
 export interface TelegramCallbackQuery {
@@ -225,3 +267,28 @@ export interface InlineKeyboardMarkup {
 }
 
 export type TelegramReplyMarkup = ReplyKeyboardMarkup | InlineKeyboardMarkup;
+
+export interface ScheduledControllerLike {
+  cron: string;
+  scheduledTime: number;
+  noRetry?(): void;
+}
+
+export interface ExecutionContextLike {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+export interface AdminSystemStats {
+  authorized_users: number;
+  personal_profiles: number;
+  active_outages: number;
+  archived_outages: number;
+  outage_number_observations: number;
+  daily_notifications_24h: number;
+  change_notifications_24h: number;
+  reminders_24h: number;
+  pending_special_requests: number;
+  support_stars_total: number;
+  pending_tether_submissions: number;
+  manual_operations_24h: number;
+}
