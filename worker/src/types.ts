@@ -28,6 +28,7 @@ export interface Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
   SYNC_SECRET: string;
+  PERSONALIZATION_PASSWORD?: string;
   NOTIFY_CHAT_ID?: string;
 }
 
@@ -137,6 +138,46 @@ export interface ChatSession {
   updated_at: string;
 }
 
+export type PersonalMatchMode = "outage_number" | "address_keyword";
+
+export interface TelegramUserRecord {
+  telegram_user_id: string;
+  chat_id: string;
+  username: string;
+  first_name: string;
+  last_name: string;
+  is_authorized: number;
+  authorized_at: string | null;
+  revoked_at: string | null;
+  last_seen_at: string;
+  failed_password_attempts: number;
+  password_window_started_at: string | null;
+  locked_until: string | null;
+}
+
+export interface PersonalizationFlow {
+  telegram_user_id: string;
+  chat_id: string;
+  state: string;
+  city_key: string | null;
+  match_mode: PersonalMatchMode | null;
+  updated_at: string;
+}
+
+export interface PersonalOutageProfile {
+  telegram_user_id: string;
+  city_key: string;
+  match_mode: PersonalMatchMode;
+  match_value: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PasswordFailureState {
+  attempts: number;
+  lockedUntil: string | null;
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
@@ -154,6 +195,7 @@ export interface TelegramMessage {
   message_id: number;
   chat: {
     id: number;
+    type?: string;
   };
   from?: TelegramUser;
   text?: string;

@@ -1,6 +1,7 @@
 import {
   getOutageNumberAnalysis,
   listSyncStatuses,
+  revokeTelegramUser,
 } from "./database";
 import { cityByKey } from "./config";
 import {
@@ -96,6 +97,32 @@ async function route(request: Request, env: Env): Promise<Response> {
       return unauthorized();
     }
     return jsonResponse({ ok: true, result: await getTelegramWebhookInfo(env) });
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/revoke-user") {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) {
+      return unauthorized();
+    }
+    const rawBody = await parseJson(request);
+    if (!rawBody || typeof rawBody !== "object") {
+      return jsonResponse({ ok: false, error: "JSON object required." }, 400);
+    }
+    const candidate = (rawBody as { telegram_user_id?: unknown }).telegram_user_id;
+    if (typeof candidate !== "string" && typeof candidate !== "number") {
+      return jsonResponse(
+        { ok: false, error: "telegram_user_id is required." },
+        400,
+      );
+    }
+    const telegramUserId = String(candidate).trim();
+    if (!/^\d+$/.test(telegramUserId)) {
+      return jsonResponse(
+        { ok: false, error: "telegram_user_id must contain digits only." },
+        400,
+      );
+    }
+    const revoked = await revokeTelegramUser(env.DB, telegramUserId);
+    return jsonResponse({ ok: true, telegram_user_id: telegramUserId, revoked });
   }
 
   if (

@@ -8,6 +8,12 @@ import type {
   NotificationBatch,
   OutageRow,
   PendingCitySnapshot,
+  PasswordFailureState,
+  PersonalOutageProfile,
+  PersonalizationFlow,
+  PersonalMatchMode,
+  TelegramUser,
+  TelegramUserRecord,
 } from "./types";
 
 interface NotificationBatchRecord {
@@ -576,4 +582,215 @@ export async function listSyncStatuses(
     )
     .all<CitySyncStatus>();
   return result.results;
+}
+
+
+export async function upsertTelegramUser(
+  db: D1Database,
+  telegramUser: TelegramUser,
+  chatId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO telegram_users " +
+        "(telegram_user_id, chat_id, username, first_name, last_name, " +
+        "is_authorized, last_seen_at) VALUES (?, ?, ?, ?, ?, 0, ?) " +
+        "ON CONFLICT(telegram_user_id) DO UPDATE SET " +
+        "chat_id = excluded.chat_id, " +
+        "username = excluded.username, " +
+        "first_name = excluded.first_name, " +
+        "last_name = excluded.last_name, " +
+        "last_seen_at = excluded.last_seen_at",
+    )
+    .bind(
+      String(telegramUser.id),
+      chatId,
+      telegramUser.username?.trim() ?? "",
+      telegramUser.first_name?.trim() ?? "",
+      telegramUser.last_name?.trim() ?? "",
+      now,
+    )
+    .run();
+}
+
+export async function getTelegramUser(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<TelegramUserRecord | null> {
+  return db
+    .prepare(
+      "SELECT telegram_user_id, chat_id, username, first_name, last_name, " +
+        "is_authorized, authorized_at, revoked_at, last_seen_at, " +
+        "failed_password_attempts, password_window_started_at, locked_until " +
+        "FROM telegram_users WHERE telegram_user_id = ?",
+    )
+    .bind(telegramUserId)
+    .first<TelegramUserRecord>();
+}
+
+export async function authorizeTelegramUser(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "UPDATE telegram_users SET is_authorized = 1, authorized_at = ?, " +
+        "revoked_at = NULL, failed_password_attempts = 0, " +
+        "password_window_started_at = NULL, locked_until = NULL " +
+        "WHERE telegram_user_id = ?",
+    )
+    .bind(now, telegramUserId)
+    .run();
+}
+
+export async function revokeTelegramUser(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<boolean> {
+  const now = new Date().toISOString();
+  const result = await db
+    .prepare(
+      "UPDATE telegram_users SET is_authorized = 0, revoked_at = ?, " +
+        "failed_password_attempts = 0, password_window_started_at = NULL, " +
+        "locked_until = NULL WHERE telegram_user_id = ?",
+    )
+    .bind(now, telegramUserId)
+    .run();
+  await clearPersonalizationFlow(db, telegramUserId);
+  return (result.meta.changes ?? 0) > 0;
+}
+
+export async function recordPasswordFailure(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<PasswordFailureState> {
+  const user = await getTelegramUser(db, telegramUserId);
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const windowMs = 15 * 60 * 1000;
+  const existingStartMs = user?.password_window_started_at
+    ? Date.parse(user.password_window_started_at)
+    : Number.NaN;
+
+  const windowExpired =
+    !Number.isFinite(existingStartMs) || nowMs - existingStartMs >= windowMs;
+  const attempts = windowExpired
+    ? 1
+    : Math.max(0, user?.failed_password_attempts ?? 0) + 1;
+  const windowStartedAt = windowExpired
+    ? now
+    : (user?.password_window_started_at ?? now);
+  const lockedUntil =
+    attempts >= 5 ? new Date(nowMs + windowMs).toISOString() : null;
+
+  await db
+    .prepare(
+      "UPDATE telegram_users SET failed_password_attempts = ?, " +
+        "password_window_started_at = ?, locked_until = ? " +
+        "WHERE telegram_user_id = ?",
+    )
+    .bind(attempts, windowStartedAt, lockedUntil, telegramUserId)
+    .run();
+
+  return { attempts, lockedUntil };
+}
+
+export async function getPersonalizationFlow(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<PersonalizationFlow | null> {
+  return db
+    .prepare(
+      "SELECT telegram_user_id, chat_id, state, city_key, match_mode, updated_at " +
+        "FROM personalization_flows WHERE telegram_user_id = ?",
+    )
+    .bind(telegramUserId)
+    .first<PersonalizationFlow>();
+}
+
+export async function setPersonalizationFlow(
+  db: D1Database,
+  telegramUserId: string,
+  chatId: string,
+  state: string,
+  cityKey: string | null,
+  matchMode: PersonalMatchMode | null,
+): Promise<void> {
+  await db
+    .prepare(
+      "INSERT INTO personalization_flows " +
+        "(telegram_user_id, chat_id, state, city_key, match_mode, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(telegram_user_id) DO UPDATE SET " +
+        "chat_id = excluded.chat_id, state = excluded.state, " +
+        "city_key = excluded.city_key, match_mode = excluded.match_mode, " +
+        "updated_at = excluded.updated_at",
+    )
+    .bind(
+      telegramUserId,
+      chatId,
+      state,
+      cityKey,
+      matchMode,
+      new Date().toISOString(),
+    )
+    .run();
+}
+
+export async function clearPersonalizationFlow(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<void> {
+  await db
+    .prepare("DELETE FROM personalization_flows WHERE telegram_user_id = ?")
+    .bind(telegramUserId)
+    .run();
+}
+
+export async function getPersonalOutageProfile(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<PersonalOutageProfile | null> {
+  return db
+    .prepare(
+      "SELECT telegram_user_id, city_key, match_mode, match_value, " +
+        "created_at, updated_at FROM personal_outage_profiles " +
+        "WHERE telegram_user_id = ?",
+    )
+    .bind(telegramUserId)
+    .first<PersonalOutageProfile>();
+}
+
+export async function savePersonalOutageProfile(
+  db: D1Database,
+  telegramUserId: string,
+  cityKey: string,
+  matchMode: PersonalMatchMode,
+  matchValue: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO personal_outage_profiles " +
+        "(telegram_user_id, city_key, match_mode, match_value, created_at, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(telegram_user_id) DO UPDATE SET " +
+        "city_key = excluded.city_key, match_mode = excluded.match_mode, " +
+        "match_value = excluded.match_value, updated_at = excluded.updated_at",
+    )
+    .bind(telegramUserId, cityKey, matchMode, matchValue, now, now)
+    .run();
+}
+
+export async function deletePersonalOutageProfile(
+  db: D1Database,
+  telegramUserId: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare("DELETE FROM personal_outage_profiles WHERE telegram_user_id = ?")
+    .bind(telegramUserId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
 }
