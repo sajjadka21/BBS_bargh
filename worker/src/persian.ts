@@ -30,6 +30,23 @@ export function normalizePersianText(value: string): string {
     .trim();
 }
 
+
+/**
+ * Build a conservative identity value for outage addresses.
+ *
+ * Only presentation differences are removed. There is deliberately no fuzzy
+ * matching: different meaningful words or numbers always create a new block.
+ */
+export function canonicalizeAddressIdentity(value: string): string {
+  return normalizePersianText(value)
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, "")
+    .replace(/[\u200C\u200D]/g, " ")
+    .replace(/[_.,\u060C:\u061B;!?\u061F()\[\]{}"'\/\\|+=*#@~`<>\-\u00AB\u00BB\u2010-\u2015\u2212]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function toPersianDigits(value: string | number): string {
   return String(value).replace(/[0-9٠-٩]/g, mapDigitToPersian);
 }

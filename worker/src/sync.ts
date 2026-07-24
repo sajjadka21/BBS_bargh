@@ -10,11 +10,13 @@ import {
   savePendingCitySnapshot,
   updateCitySyncMetadata,
 } from "./database";
-import { normalizePersianText } from "./persian";
+import {
+  canonicalizeAddressIdentity,
+  normalizePersianText,
+} from "./persian";
 import {
   compareJalaliDateText,
   isSnapshotTimeEligible,
-  requiredConsecutiveFetches,
 } from "./snapshot-policy";
 import {
   notifyNewOutages,
@@ -143,7 +145,8 @@ async function outageIdentityKey(
   cityKey: string,
   address: string,
 ): Promise<string> {
-  return sha256([cityKey, address].join("\u001f"));
+  const canonicalAddress = canonicalizeAddressIdentity(address);
+  return sha256([cityKey, canonicalAddress].join("\u001f"));
 }
 
 async function snapshotIdentityFingerprint(
@@ -317,6 +320,118 @@ function normalizeObservations(
   });
 
   return [...deduplicated.values()];
+}
+
+
+function parsePendingNormalizedRows(value: string): NormalizedOutage[] {
+  try {
+    const parsed: unknown = JSON.parse(value || "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((row): row is NormalizedOutage => {
+      if (!row || typeof row !== "object") {
+        return false;
+      }
+
+      const candidate = row as Partial<NormalizedOutage>;
+      return (
+        typeof candidate.cityKey === "string" &&
+        typeof candidate.outageKey === "string" &&
+        typeof candidate.address === "string" &&
+        typeof candidate.outageType === "string" &&
+        typeof candidate.fromTime === "string" &&
+        typeof candidate.toTime === "string" &&
+        typeof candidate.outageDate === "string" &&
+        Array.isArray(candidate.outageNumbers) &&
+        Array.isArray(candidate.sourceCityIds) &&
+        typeof candidate.fetchedAt === "string"
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function reconcileIncomingIdentity(
+  incomingRows: NormalizedOutage[],
+  existingRows: Array<{ outageKey: string; address: string }>,
+): NormalizedOutage[] {
+  const existingKeys = new Set(existingRows.map((row) => row.outageKey));
+  const keysByCanonicalAddress = new Map<string, string[]>();
+
+  for (const row of existingRows) {
+    const canonical = canonicalizeAddressIdentity(row.address);
+    if (!canonical) {
+      continue;
+    }
+
+    const keys = keysByCanonicalAddress.get(canonical) ?? [];
+    keys.push(row.outageKey);
+    keysByCanonicalAddress.set(canonical, keys);
+  }
+
+  return incomingRows.map((row) => {
+    if (existingKeys.has(row.outageKey)) {
+      return row;
+    }
+
+    const canonical = canonicalizeAddressIdentity(row.address);
+    const candidates = canonical
+      ? keysByCanonicalAddress.get(canonical) ?? []
+      : [];
+
+    // Reuse an old key only for one unambiguous exact canonical match.
+    const candidateKey = candidates[0];
+    if (candidates.length !== 1 || !candidateKey) {
+      return row;
+    }
+
+    return {
+      ...row,
+      outageKey: candidateKey,
+    };
+  });
+}
+
+function mergeDeltaRows(
+  storedRows: NormalizedOutage[],
+  incomingRows: NormalizedOutage[],
+): NormalizedOutage[] {
+  const merged = new Map(
+    storedRows.map((row) => [row.outageKey, row] as const),
+  );
+
+  for (const incoming of incomingRows) {
+    const stored = merged.get(incoming.outageKey);
+
+    if (!stored) {
+      merged.set(incoming.outageKey, incoming);
+      continue;
+    }
+
+    merged.set(incoming.outageKey, {
+      ...stored,
+      ...incoming,
+      outageNumbers:
+        incoming.outageNumbers.length > 0
+          ? [...incoming.outageNumbers]
+          : [...stored.outageNumbers],
+      sourceCityIds: [
+        ...new Set([
+          ...stored.sourceCityIds,
+          ...incoming.sourceCityIds,
+        ]),
+      ].sort((left, right) =>
+        left.localeCompare(right, "en", { numeric: true }),
+      ),
+    });
+  }
+
+  return [...merged.values()].sort((left, right) =>
+    left.outageKey.localeCompare(right.outageKey),
+  );
 }
 
 function inferActiveDate(rows: OutageRow[]): string {
@@ -522,7 +637,7 @@ export async function synchronizeSnapshots(
     // Parse/validate once even if the city has no rows.
     compareJalaliDateText(snapshotDate, snapshotDate);
 
-    const rows = await normalizeRows(
+    let rows = await normalizeRows(
       cityKey,
       cityInput.rows,
       fetchedAt,
@@ -538,6 +653,15 @@ export async function synchronizeSnapshots(
 
     const status = await getCitySyncStatus(env.DB, cityKey);
     const storedRows = await listCityOutagesForIdentity(env.DB, cityKey);
+
+    rows = reconcileIncomingIdentity(
+      rows,
+      storedRows.map((row) => ({
+        outageKey: row.outage_key,
+        address: row.address,
+      })),
+    );
+
     const activeDate = status?.active_date || inferActiveDate(storedRows);
     const hasActiveSnapshot = storedRows.length > 0 && Boolean(activeDate);
     const isInitialSync = !hasActiveSnapshot;
@@ -638,37 +762,50 @@ export async function synchronizeSnapshots(
       }
     }
 
-    const fingerprint = await snapshotIdentityFingerprint(rows);
     const pending = await getPendingCitySnapshot(env.DB, cityKey);
-    const samePendingCandidate =
-      pending?.snapshot_date === snapshotDate &&
-      pending.fingerprint === fingerprint;
-    const consecutiveCount = samePendingCandidate
+    const previousPendingRows =
+      pending?.snapshot_date === snapshotDate
+        ? parsePendingNormalizedRows(pending.rows_json)
+        : [];
+
+    const reconciledIncoming = reconcileIncomingIdentity(
+      rows,
+      previousPendingRows.map((row) => ({
+        outageKey: row.outageKey,
+        address: row.address,
+      })),
+    );
+
+    // Maztozi is treated as a delta feed. Missing rows never remove previously
+    // collected blocks. New rows are added and matching rows are updated.
+    const accumulatedRows = mergeDeltaRows(
+      previousPendingRows,
+      reconciledIncoming,
+    );
+
+    const fingerprint = await snapshotIdentityFingerprint(accumulatedRows);
+    const samePendingDate = pending?.snapshot_date === snapshotDate;
+    const fetchCount = samePendingDate
       ? pending.consecutive_count + 1
       : 1;
-    const firstSeenAt = samePendingCandidate
+    const firstSeenAt = samePendingDate
       ? pending.first_seen_at
       : fetchedAt;
-    const requiredCount = requiredConsecutiveFetches(rows.length);
     const timeEligible = isSnapshotTimeEligible(snapshotDate, fetchedAt);
-    const contentEligible =
-      requiredCount !== null && consecutiveCount >= requiredCount;
 
-    if (!timeEligible || !contentEligible) {
+    if (!timeEligible || accumulatedRows.length === 0) {
       const decision =
-        rows.length === 0
-          ? "pending_empty_never_activates"
-          : !timeEligible
-            ? "pending_before_23"
-            : "pending_needs_confirmation";
+        accumulatedRows.length === 0
+          ? "delta_empty_no_change"
+          : "delta_pending_before_activation";
 
       await savePendingCitySnapshot(
         env.DB,
         cityKey,
         snapshotDate,
         fingerprint,
-        rows,
-        consecutiveCount,
+        accumulatedRows,
+        fetchCount,
         firstSeenAt,
         fetchedAt,
         activeDate,
@@ -683,9 +820,9 @@ export async function synchronizeSnapshots(
         decision,
         stored_count: storedRows.length,
         incoming_count: rows.length,
-        pending_count: rows.length,
-        pending_consecutive_count: consecutiveCount,
-        required_consecutive_count: requiredCount,
+        accumulated_count: accumulatedRows.length,
+        pending_count: accumulatedRows.length,
+        pending_fetch_count: fetchCount,
         time_eligible: timeEligible,
         new_count: 0,
         initial_sync: isInitialSync,
@@ -695,12 +832,13 @@ export async function synchronizeSnapshots(
     }
 
     const decision = hasActiveSnapshot
-      ? "activated_new_date"
-      : "activated_initial_snapshot";
+      ? "activated_new_date_delta"
+      : "activated_initial_delta";
+
     await activateCitySnapshot(
       env.DB,
       cityKey,
-      rows,
+      accumulatedRows,
       fetchedAt,
       activeDate,
       snapshotDate,
@@ -708,14 +846,20 @@ export async function synchronizeSnapshots(
     );
 
     const notificationError = hasActiveSnapshot
-      ? await safelyNotify(env, city.key, city.label, rows)
+      ? await safelyNotify(
+          env,
+          city.key,
+          city.label,
+          accumulatedRows,
+        )
       : null;
+
     const personalNotification = await safelyNotifyPersonal(
       env,
       city.key,
       city.label,
       snapshotDate,
-      rows.map(toDatabaseRow),
+      accumulatedRows.map(toDatabaseRow),
     );
 
     results.push({
@@ -724,12 +868,12 @@ export async function synchronizeSnapshots(
       active_date: snapshotDate,
       previous_active_date: activeDate || null,
       decision,
-      stored_count: rows.length,
+      stored_count: accumulatedRows.length,
       incoming_count: rows.length,
-      new_count: hasActiveSnapshot ? rows.length : 0,
+      accumulated_count: accumulatedRows.length,
+      new_count: hasActiveSnapshot ? accumulatedRows.length : 0,
       initial_sync: isInitialSync,
-      pending_consecutive_count: consecutiveCount,
-      required_consecutive_count: requiredCount,
+      pending_fetch_count: fetchCount,
       time_eligible: timeEligible,
       observation_count: observations.length,
       notification_error: notificationError,
