@@ -226,26 +226,26 @@ function manualOperationLabel(
   operationType: string,
 ): string {
   if (operationType === "fetch_all") {
-    return "????????? ???";
+    return "بروزرسانی همه";
   }
 
   if (
     operationType === "fetch_cities" ||
     operationType === "fetch"
   ) {
-    return "????????? ?????? Maztozi";
+    return "بروزرسانی شهرهای Maztozi";
   }
 
   if (operationType === "fetch_special") {
-    return "????????? ??????????? ????";
+    return "بروزرسانی استعلام‌های ویژه برق‌من";
   }
 
   if (operationType === "discover_pending") {
-    return "??? ?????? ?? ??????";
+    return "کشف شهرهای در انتظار";
   }
 
   if (operationType === "discover_all") {
-    return "??? ??? ??????????? Maztozi";
+    return "کشف همه شهرستان‌های Maztozi";
   }
 
   return operationType;
@@ -268,13 +268,13 @@ async function notifyAdminManualOperationStarted(
   await callTelegram(env, "sendMessage", {
     chat_id: adminId,
     text: [
-      "?? <b>?????? ??? Runner ???? ??</b>",
-      `???: ${escapeHtml(
+      "▶️ <b>عملیات روی Runner شروع شد</b>",
+      `نوع: ${escapeHtml(
         manualOperationLabel(operation.operation_type),
       )}`,
-      `?????: <code>${escapeHtml(operation.operation_id)}</code>`,
+      `شناسه: <code>${escapeHtml(operation.operation_id)}</code>`,
       operation.run_url
-        ? `?? ${escapeHtml(operation.run_url)}`
+        ? `🔗 ${escapeHtml(operation.run_url)}`
         : "",
     ].filter(Boolean).join("\n"),
     parse_mode: "HTML",
@@ -295,19 +295,19 @@ async function notifyAdminWaitingManualOperations(
   await callTelegram(env, "sendMessage", {
     chat_id: adminId,
     text: [
-      "?? <b>Runner ???? ?? ????? ????</b>",
+      "💻 <b>Runner هنوز در دسترس نیست</b>",
       "",
       ...waiting.map(
         (operation) =>
-          `? ${escapeHtml(
+          `• ${escapeHtml(
             manualOperationLabel(operation.operation_type),
-          )} ? <code>${escapeHtml(
+          )} — <code>${escapeHtml(
             operation.operation_id.slice(0, 8),
           )}</code>`,
       ),
       "",
-      "?????? ?? ?? GitHub ???? ???????.",
-      "?????? ???? ????? ?????? ? Runner ?????? ?? ??? ???? ????.",
+      "عملیات در صف GitHub باقی می‌ماند.",
+      "لپ‌تاپ باید روشن، آنلاین و Runner ویندوز در حال اجرا باشد.",
     ].join("\n"),
     parse_mode: "HTML",
   });
@@ -331,25 +331,27 @@ async function notifyAdminManualOperationResult(
     return;
   }
 
-  const operationId = operation?.operation_id ?? "??????";
-  const operationType = operation?.operation_type ?? "??????";
+  const operationId = operation?.operation_id ?? "نامشخص";
+  const operationType = operation?.operation_type ?? "نامشخص";
   const runUrl = operation?.run_url ?? "";
 
   await callTelegram(env, "sendMessage", {
     chat_id: adminId,
     text: [
       ok
-        ? "? <b>?????? ?? ?????? ????? ????</b>"
-        : "?? <b>?????? ?????? ???</b>",
-      `???: ${escapeHtml(
+        ? "✅ <b>عملیات با موفقیت پایان یافت</b>"
+        : "⚠️ <b>عملیات ناموفق بود</b>",
+      `نوع: ${escapeHtml(
         manualOperationLabel(operationType),
       )}`,
-      `?????: <code>${escapeHtml(operationId)}</code>`,
+      `شناسه: <code>${escapeHtml(operationId)}</code>`,
       !ok
-        ? `???: ${escapeHtml(errorText || "???? ??????")}`
+        ? `خطا: ${escapeHtml(
+            errorText || "خطای نامشخص",
+          )}`
         : "",
       runUrl
-        ? `?? ${escapeHtml(runUrl)}`
+        ? `🔗 ${escapeHtml(runUrl)}`
         : "",
     ].filter(Boolean).join("\n"),
     parse_mode: "HTML",
@@ -358,7 +360,7 @@ async function notifyAdminManualOperationResult(
       inline_keyboard: [
         [
           {
-            text: "?? ???? ????",
+            text: "🏠 منوی اصلی",
             callback_data: "go_main",
           },
         ],

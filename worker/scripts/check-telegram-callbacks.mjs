@@ -31,6 +31,18 @@ const workflow = fs.readFileSync(
   ),
   "utf8",
 );
+const manualOperations = fs.readFileSync(
+  path.join(workerRoot, "src", "manual-operations.ts"),
+  "utf8",
+);
+const indexSource = fs.readFileSync(
+  path.join(workerRoot, "src", "index.ts"),
+  "utf8",
+);
+const syncSource = fs.readFileSync(
+  path.join(workerRoot, "src", "sync.ts"),
+  "utf8",
+);
 
 const errors = [];
 
@@ -115,6 +127,34 @@ for (const operation of [
 if (telegram.includes("با سیاست Snapshot همگام")) {
   errors.push(
     "legacy Snapshot wording still exists in Telegram messages",
+  );
+}
+
+for (const [label, source] of [
+  ["manual-operations.ts", manualOperations],
+  ["index.ts", indexSource],
+  ["manual-operations.yml", workflow],
+]) {
+  if (source.includes("????")) {
+    errors.push(`${label}: corrupted question-mark text exists`);
+  }
+}
+
+if (syncSource.includes("clearPendingCitySnapshot")) {
+  errors.push(
+    "sync.ts: active or older fetch can still clear pending delta rows",
+  );
+}
+
+for (const decision of [
+  "delta_empty_preserved_pending",
+  "ignored_older_pending_date",
+  "delta_pending_before_activation",
+]) {
+  requireText(
+    syncSource,
+    `"${decision}"`,
+    "delta pending decision",
   );
 }
 

@@ -1,7 +1,6 @@
 import { cityByKey } from "./config";
 import {
   activateCitySnapshot,
-  clearPendingCitySnapshot,
   getCitySyncStatus,
   getPendingCitySnapshot,
   listCityOutagesForIdentity,
@@ -670,7 +669,7 @@ export async function synchronizeSnapshots(
       const dateOrder = compareJalaliDateText(snapshotDate, activeDate);
 
       if (dateOrder < 0) {
-        await clearPendingCitySnapshot(env.DB, cityKey);
+        // An older response must never remove a newer accumulated pending date.
         await updateCitySyncMetadata(
           env.DB,
           cityKey,
@@ -695,9 +694,8 @@ export async function synchronizeSnapshots(
       }
 
       if (dateOrder === 0) {
-        // Any different-date fetch breaks a pending consecutive sequence.
-        await clearPendingCitySnapshot(env.DB, cityKey);
-
+        // Same-date deltas update active rows only. A future pending date stays
+        // intact until it becomes eligible for activation.
         const storedKeys = new Set(storedRows.map((row) => row.outage_key));
         const newRows = rows.filter((row) => !storedKeys.has(row.outageKey));
         const mergedIncoming = mergeIncomingWithStored(rows, storedRows);
@@ -763,6 +761,50 @@ export async function synchronizeSnapshots(
     }
 
     const pending = await getPendingCitySnapshot(env.DB, cityKey);
+
+    if (pending && pending.snapshot_date !== snapshotDate) {
+      const pendingRows = parsePendingNormalizedRows(pending.rows_json);
+      const orderAgainstPending = compareJalaliDateText(
+        snapshotDate,
+        pending.snapshot_date,
+      );
+
+      // An empty response for another date has no information that can replace
+      // accumulated pending rows. Likewise, an older candidate must not
+      // overwrite a newer pending date.
+      if (rows.length === 0 || orderAgainstPending < 0) {
+        const decision =
+          rows.length === 0
+            ? "delta_empty_preserved_pending"
+            : "ignored_older_pending_date";
+
+        await updateCitySyncMetadata(
+          env.DB,
+          cityKey,
+          fetchedAt,
+          storedRows.length,
+          activeDate,
+          decision,
+          snapshotDate,
+        );
+
+        results.push({
+          city_key: cityKey,
+          snapshot_date: snapshotDate,
+          active_date: activeDate || null,
+          pending_date: pending.snapshot_date,
+          decision,
+          stored_count: storedRows.length,
+          incoming_count: rows.length,
+          pending_count: pendingRows.length,
+          new_count: 0,
+          initial_sync: isInitialSync,
+          observation_count: observations.length,
+        });
+        continue;
+      }
+    }
+
     const previousPendingRows =
       pending?.snapshot_date === snapshotDate
         ? parsePendingNormalizedRows(pending.rows_json)
