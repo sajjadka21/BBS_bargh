@@ -406,7 +406,15 @@ def main() -> int:
         "Content-Type": "application/json; charset=UTF-8",
         "Origin": "https://bargheman.com",
         "Referer": "https://bargheman.com/",
-        "User-Agent": "BBS-bargh-special-fetch/1.0",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/149.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
         "Authorization": authorization,
     }
     session = requests.Session()
@@ -420,8 +428,21 @@ def main() -> int:
             timeout=45,
         )
         if bills_response.status_code in (401, 403):
-            send_health("auth_failed", f"GetBills returned HTTP {bills_response.status_code}.", expires)
-            raise RuntimeError("Bargheman authorization was rejected. Run bargheman_bootstrap.py again.")
+            content_type = bills_response.headers.get("Content-Type", "")
+            server = bills_response.headers.get("Server", "")
+            diagnostic = (
+                f"GetBills returned HTTP {bills_response.status_code}; "
+                f"content-type={content_type or 'unknown'}; "
+                f"server={server or 'unknown'}; "
+                f"response-bytes={len(bills_response.content)}. "
+                "JWT is not expired. Possible runner IP or request-header restriction."
+            )
+            print(f"Bargheman access diagnostic: {diagnostic}", file=sys.stderr)
+            send_health("access_rejected", diagnostic, expires)
+            raise RuntimeError(
+                f"Bargheman GetBills access was rejected with HTTP "
+                f"{bills_response.status_code}. JWT is not expired."
+            )
         bills_response.raise_for_status()
         bills_body = bills_response.json()
     except requests.RequestException as exc:
