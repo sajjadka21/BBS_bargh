@@ -438,7 +438,12 @@ def main() -> int:
                 "JWT is not expired. Possible runner IP or request-header restriction."
             )
             print(f"Bargheman access diagnostic: {diagnostic}", file=sys.stderr)
-            send_health("access_rejected", diagnostic, expires)
+            health_status = (
+                "auth_failed"
+                if bills_response.status_code == 401
+                else "access_rejected"
+            )
+            send_health(health_status, diagnostic, expires)
             raise RuntimeError(
                 f"Bargheman GetBills access was rejected with HTTP "
                 f"{bills_response.status_code}. JWT is not expired."
