@@ -1,10 +1,13 @@
-name: Fetch Bargheman special outages
+﻿name: Fetch Bargheman special outages
 
 on:
   schedule:
-    # Iran time (UTC+03:30): 00:30, 06:00, 12:00, 18:00
-    - cron: "0 21 * * *"
-    - cron: "30 2,8,14 * * *"
+    - cron: "30 0 * * *"
+      timezone: "Asia/Tehran"
+
+    - cron: "0 6,12,18 * * *"
+      timezone: "Asia/Tehran"
+
   workflow_dispatch: {}
 
 permissions:
@@ -16,21 +19,29 @@ concurrency:
 
 jobs:
   fetch-special-outages:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 15
+
+    defaults:
+      run:
+        shell: cmd
+
+    env:
+      PYTHON_EXE: C:\Users\sajjad.ka21\AppData\Local\Programs\Python\Python310\python.exe
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
+      - name: Check Python
+        run: |
+          if not exist "%PYTHON_EXE%" (echo Python not found at %PYTHON_EXE% & exit /b 1)
+          "%PYTHON_EXE%" --version
+          "%PYTHON_EXE%" -m pip --version
 
       - name: Install runtime dependencies
-        run: python -m pip install --disable-pip-version-check requests jdatetime tzdata
+        run: |
+          "%PYTHON_EXE%" -m pip install --disable-pip-version-check requests jdatetime tzdata
 
       - name: Fetch and synchronize approved bills
         env:
@@ -38,4 +49,5 @@ jobs:
           WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
           BARGHEMAN_AUTHORIZATION: ${{ secrets.BARGHEMAN_AUTHORIZATION }}
           BARGHEMAN_PLANNED_TEMPLATE: ${{ secrets.BARGHEMAN_PLANNED_TEMPLATE }}
-        run: python ./bargheman_special_fetch.py
+        run: |
+          "%PYTHON_EXE%" bargheman_special_fetch.py
