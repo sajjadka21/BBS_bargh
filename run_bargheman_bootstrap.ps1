@@ -19,8 +19,6 @@ if ($LASTEXITCODE -ne 0) {
 & $PythonExe -m pip install --disable-pip-version-check -r .\requirements-bargheman-bootstrap.txt
 if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed." }
 
-& $PythonExe -m playwright install chromium
-if ($LASTEXITCODE -ne 0) { throw "Playwright Chromium installation failed." }
 
 & $PythonExe .\bargheman_bootstrap.py --repository $Repository
 if ($LASTEXITCODE -ne 0) { throw "Bargheman bootstrap failed." }
