@@ -16,7 +16,11 @@ import {
   isSnapshotTimeEligible,
   requiredConsecutiveFetches,
 } from "./snapshot-policy";
-import { notifyNewOutages } from "./telegram";
+import {
+  notifyNewOutages,
+  notifyPersonalOutageChangesForCityDate,
+  notifyPersonalOutagesForCityDate,
+} from "./telegram";
 import type {
   Env,
   NormalizedOutage,
@@ -341,12 +345,10 @@ function mergeIncomingWithStored(
     }
     return {
       ...row,
-      outageNumbers: [
-        ...new Set([
-          ...parseStoredIdentifierArray(stored.outage_numbers),
-          ...row.outageNumbers,
-        ]),
-      ].sort((left, right) => left.localeCompare(right, "en", { numeric: true })),
+      // The current value is derived from the short code at the beginning of
+      // the address. Replace historical provider outage numbers instead of
+      // unioning them, otherwise the old long identifiers remain visible.
+      outageNumbers: [...row.outageNumbers],
       sourceCityIds: [
         ...new Set([
           ...parseStoredIdentifierArray(stored.source_city_ids),
@@ -389,6 +391,75 @@ async function safelyNotify(
       error instanceof Error ? error.message : "Unknown notification error";
     console.error("New-outage notification failed:", error);
     return message;
+  }
+}
+
+
+async function safelyNotifyPersonalChanges(
+  env: Env,
+  cityKey: string,
+  cityLabel: string,
+  snapshotDate: string,
+  previousRows: OutageRow[],
+  currentRows: OutageRow[],
+): Promise<Record<string, unknown>> {
+  try {
+    const result = await notifyPersonalOutageChangesForCityDate(
+      env,
+      cityKey,
+      cityLabel,
+      snapshotDate,
+      previousRows,
+      currentRows,
+    );
+    return {
+      personal_change_users_notified: result.usersNotified,
+      personal_change_events_notified: result.eventsNotified,
+      personal_change_notification_errors: result.errors,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Unknown personal change notification error";
+    console.error("Personal outage change processing failed:", error);
+    return {
+      personal_change_users_notified: 0,
+      personal_change_events_notified: 0,
+      personal_change_notification_errors: [message],
+    };
+  }
+}
+
+async function safelyNotifyPersonal(
+  env: Env,
+  cityKey: string,
+  cityLabel: string,
+  snapshotDate: string,
+  rows: OutageRow[],
+): Promise<Record<string, unknown>> {
+  try {
+    const result = await notifyPersonalOutagesForCityDate(
+      env,
+      cityKey,
+      cityLabel,
+      snapshotDate,
+      rows,
+    );
+    return {
+      personal_users_notified: result.usersNotified,
+      personal_profiles_notified: result.profilesNotified,
+      personal_notification_errors: result.errors,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown personal notification error";
+    console.error("Personal outage notification processing failed:", error);
+    return {
+      personal_users_notified: 0,
+      personal_profiles_notified: 0,
+      personal_notification_errors: [message],
+    };
   }
 }
 
@@ -526,6 +597,28 @@ export async function synchronizeSnapshots(
           city.label,
           newRows,
         );
+        const activeRowsByKey = new Map(
+          storedRows.map((row) => [row.outage_key, row]),
+        );
+        for (const row of mergedIncoming) {
+          activeRowsByKey.set(row.outageKey, toDatabaseRow(row));
+        }
+        const activeRows = [...activeRowsByKey.values()];
+        const personalChangeNotification = await safelyNotifyPersonalChanges(
+          env,
+          city.key,
+          city.label,
+          snapshotDate,
+          storedRows,
+          activeRows,
+        );
+        const personalNotification = await safelyNotifyPersonal(
+          env,
+          city.key,
+          city.label,
+          snapshotDate,
+          activeRows,
+        );
 
         results.push({
           city_key: cityKey,
@@ -538,6 +631,8 @@ export async function synchronizeSnapshots(
           initial_sync: false,
           observation_count: observations.length,
           notification_error: notificationError,
+          ...personalChangeNotification,
+          ...personalNotification,
         });
         continue;
       }
@@ -615,6 +710,13 @@ export async function synchronizeSnapshots(
     const notificationError = hasActiveSnapshot
       ? await safelyNotify(env, city.key, city.label, rows)
       : null;
+    const personalNotification = await safelyNotifyPersonal(
+      env,
+      city.key,
+      city.label,
+      snapshotDate,
+      rows.map(toDatabaseRow),
+    );
 
     results.push({
       city_key: cityKey,
@@ -631,6 +733,7 @@ export async function synchronizeSnapshots(
       time_eligible: timeEligible,
       observation_count: observations.length,
       notification_error: notificationError,
+      ...personalNotification,
     });
   }
 

@@ -16,11 +16,19 @@ import { cityByKey, setRuntimeCities } from "./config";
 import {
   getTelegramWebhookInfo,
   handleTelegramUpdate,
+  notifyAdminProviderHealth,
+  notifySpecialOutageChanges,
   runScheduledPersonalReminders,
+  runScheduledSpecialReminders,
   setTelegramWebhook,
 } from "./telegram";
 import { synchronizeSnapshots } from "./sync";
 import { completeManualOperation } from "./manual-operations";
+import {
+  listSpecialFetchTargets,
+  synchronizeSpecialOutages,
+  updateProviderHealth,
+} from "./special-outages";
 import type {
   Env,
   ExecutionContextLike,
@@ -346,6 +354,36 @@ async function route(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ ok: true });
   }
 
+  if (request.method === "GET" && url.pathname === "/special/fetch-config") {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
+    return jsonResponse({
+      ok: true,
+      provider: "bargheman",
+      targets: await listSpecialFetchTargets(env),
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === "/special/sync") {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
+    const payload = await parseJson(request);
+    const result = await synchronizeSpecialOutages(env, payload);
+    const notifications = await notifySpecialOutageChanges(env, result.changed);
+    return jsonResponse({
+      ok: true,
+      processed: result.processed,
+      errors: result.errors,
+      notifications,
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === "/special/provider-health") {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
+    const payload = await parseJson(request);
+    const health = await updateProviderHealth(env.DB, payload);
+    await notifyAdminProviderHealth(env, health);
+    return jsonResponse({ ok: true, health });
+  }
+
   if (request.method === "POST" && url.pathname === "/sync") {
     if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
     await refreshRuntimeCities(env);
@@ -438,8 +476,11 @@ export default {
       return;
     }
     ctx.waitUntil(
-      runScheduledPersonalReminders(env).then((result) => {
-        console.log("Personal reminder check completed", result);
+      Promise.all([
+        runScheduledPersonalReminders(env),
+        runScheduledSpecialReminders(env),
+      ]).then(([personal, special]) => {
+        console.log("Reminder checks completed", { personal, special });
       }),
     );
   },

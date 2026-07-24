@@ -1230,6 +1230,14 @@ export async function runDatabaseMaintenance(
         "WHERE julianday(updated_at) < julianday('now', '-1 day')",
     ),
     db.prepare(
+      "DELETE FROM special_outage_reminders " +
+        "WHERE julianday(sent_at) < julianday('now', '-180 days')",
+    ),
+    db.prepare(
+      "DELETE FROM special_outage_change_events " +
+        "WHERE julianday(sent_at) < julianday('now', '-365 days')",
+    ),
+    db.prepare(
       "DELETE FROM special_lookup_requests " +
         "WHERE status = 'rejected' AND julianday(updated_at) < julianday('now', '-90 days')",
     ),

@@ -19,8 +19,14 @@ export function normalizePersianText(value: string): string {
     .replace(/ك/g, "ک")
     .replace(/[0-9٠-٩]/g, mapDigitToPersian)
     .replace(/ـ/g, "")
-    .replace(/\s*[-‐‑‒–—−]+\s*/g, " - ")
+    // Convert underscores and every common dash variant, including repeated
+    // separators such as __ and --, to exactly one plain spaced hyphen.
+    .replace(/\s*(?:[_\-‐‑‒–—−]+\s*)+\s*/g, " - ")
+    // Keep address text readable by separating letters and Persian digits.
+    .replace(/([\p{L}])(?=[۰-۹])/gu, "$1 ")
+    .replace(/([۰-۹])(?=[\p{L}])/gu, "$1 ")
     .replace(/\s+/g, " ")
+    .replace(/\s*(?:[_\-‐‑‒–—−]+\s*)+\s*/g, " - ")
     .trim();
 }
 

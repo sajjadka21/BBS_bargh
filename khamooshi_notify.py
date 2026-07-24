@@ -176,6 +176,23 @@ def clean_identifier(value: object) -> str:
     return "".join(str(value).translate(TIME_DIGITS_TO_ENGLISH).split())
 
 
+def extract_address_block_code(address: str) -> str:
+    """Return the numeric code at the beginning of a Maztozi address block.
+
+    Examples:
+      "۱۵۳ - شهرک المپیک" -> "153"
+      "221-دریاکنار"       -> "221"
+
+    The original address is kept unchanged for display and identity checks.
+    """
+    normalized = clean_text(address)
+    match = re.match(
+        r"^([۰-۹٠-٩0-9]{1,8})(?=\s|[-‐‑‒–—−_:،,./]|$)",
+        normalized,
+    )
+    return clean_identifier(match.group(1)) if match else ""
+
+
 def derive_time_range(value: object) -> tuple[str, str]:
     """Return the site's displayed two-hour start/end range."""
     text = clean_text(value).translate(TIME_DIGITS_TO_ENGLISH)
@@ -245,7 +262,11 @@ def normalize_api_row(
     reason = clean_text(raw_row.get("reason_outage"))
     outage_type = clean_text(f"{status_text} - {reason}" if reason else status_text)
     from_time, to_time = derive_time_range(raw_row.get("outage_time"))
-    outage_number = clean_identifier(raw_row.get("outage_number"))
+
+    # Maztozi's long outage_number is not used anymore. The short numeric code
+    # at the start of the address is stored as the displayed/matchable outage
+    # number so we can observe whether it remains stable across multiple days.
+    address_block_code = extract_address_block_code(address)
 
     return {
         "address": address,
@@ -253,7 +274,7 @@ def normalize_api_row(
         "from": clean_text(from_time),
         "to": clean_text(to_time),
         "date": clean_text(raw_row.get("outage_date")),
-        "outage_numbers": [outage_number] if outage_number else [],
+        "outage_numbers": [address_block_code] if address_block_code else [],
         "source_city_ids": [str(source_city_id)],
         "reg_date": clean_text(raw_row.get("reg_date")),
         "registerer": clean_text(raw_row.get("registerer")),
