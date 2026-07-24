@@ -2920,6 +2920,8 @@ async function handleCallbackQuery(
     data.startsWith(ADMIN_SPECIAL_SHOW_PREFIX) ||
     data.startsWith(ADMIN_SPECIAL_APPROVE_PREFIX) ||
     data.startsWith(ADMIN_SPECIAL_REJECT_PREFIX) ||
+    data.startsWith(ADMIN_SPECIAL_APPROVE_CONFIRM_PREFIX) ||
+    data.startsWith(ADMIN_SPECIAL_REJECT_CONFIRM_PREFIX) ||
     data.startsWith(ADMIN_SPECIAL_REVEAL_PREFIX) ||
     data.startsWith(ADMIN_SPECIAL_REVEAL_CONFIRM_PREFIX) ||
     data.startsWith(SUPPORT_TETHER_APPROVE_PREFIX) ||
