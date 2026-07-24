@@ -8,9 +8,12 @@ on:
         required: true
         type: choice
         options:
-          - fetch
+          - fetch_all
+          - fetch_cities
+          - fetch_special
           - discover_pending
           - discover_all
+          - fetch
       operation_id:
         description: Internal operation ID returned by the Worker
         required: true
@@ -25,34 +28,87 @@ concurrency:
 
 jobs:
   run-operation:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 120
+
+    defaults:
+      run:
+        shell: powershell
+
+    env:
+      PYTHON_EXE: C:\Users\sajjad.ka21\AppData\Local\Programs\Python\Python310\python.exe
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Validate runner and secrets
-        shell: powershell
+      - name: Validate runner and install dependencies
         env:
           WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
           WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
         run: |
           $ErrorActionPreference = "Stop"
+
+          if (-not (Test-Path -LiteralPath $env:PYTHON_EXE)) {
+            throw "Python was not found at $env:PYTHON_EXE"
+          }
+
           if ([string]::IsNullOrWhiteSpace($env:WORKER_SYNC_URL)) {
             throw "GitHub secret WORKER_SYNC_URL is missing."
           }
+
           if ([string]::IsNullOrWhiteSpace($env:WORKER_SYNC_SECRET)) {
             throw "GitHub secret WORKER_SYNC_SECRET is missing."
           }
-          python --version
 
-      - name: Run requested operation
-        shell: powershell
+          & $env:PYTHON_EXE --version
+          & $env:PYTHON_EXE -m pip install --disable-pip-version-check `
+            requests `
+            jdatetime `
+            tzdata `
+            truststore
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Python dependency installation failed."
+          }
+
+      - name: Report Runner start
         env:
           WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
           WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
-          MANUAL_OPERATION_ID: ${{ inputs.operation_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $baseUrl = $env:WORKER_SYNC_URL.TrimEnd("/")
+          if ($baseUrl.EndsWith("/sync")) {
+            $baseUrl = $baseUrl.Substring(0, $baseUrl.Length - 5)
+          }
+
+          $headers = @{
+            Authorization = "Bearer $env:WORKER_SYNC_SECRET"
+            "Content-Type" = "application/json; charset=utf-8"
+          }
+
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+
+          $body = @{
+            operation_id = "${{ inputs.operation_id }}"
+            run_url = $runUrl
+          } | ConvertTo-Json -Compress
+
+          Invoke-RestMethod `
+            -Method Post `
+            -Uri "$baseUrl/admin/manual-operation-started" `
+            -Headers $headers `
+            -Body $body
+
+      - name: Run requested operation
+        id: operation
+        env:
+          WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
+          WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
+          BARGHEMAN_AUTHORIZATION: ${{ secrets.BARGHEMAN_AUTHORIZATION }}
+          BARGHEMAN_PLANNED_TEMPLATE: ${{ secrets.BARGHEMAN_PLANNED_TEMPLATE }}
           FETCH_SOURCE: telegram-admin-manual
           AUTO_DISCOVER_MAZTOZI_SOURCES: "0"
           PLAYWRIGHT_BROWSER_CHANNEL: chrome
@@ -60,32 +116,104 @@ jobs:
           $ErrorActionPreference = "Stop"
           $operation = "${{ inputs.operation }}"
 
+          function Invoke-ProjectPython {
+            param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+
+            & $env:PYTHON_EXE @Arguments
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Python command failed: $($Arguments -join ' ')"
+            }
+          }
+
           switch ($operation) {
+            "fetch_all" {
+              Invoke-ProjectPython ".\khamooshi_notify.py"
+              Invoke-ProjectPython ".\bargheman_special_fetch.py"
+              break
+            }
+
+            "fetch_cities" {
+              Invoke-ProjectPython ".\khamooshi_notify.py"
+              break
+            }
+
+            # Backward compatibility for an older Telegram button.
             "fetch" {
-              python .\khamooshi_notify.py
+              Invoke-ProjectPython ".\khamooshi_notify.py"
               break
             }
+
+            "fetch_special" {
+              Invoke-ProjectPython ".\bargheman_special_fetch.py"
+              break
+            }
+
             "discover_pending" {
-              python -c "import playwright" 2>$null
+              & $env:PYTHON_EXE -c "import playwright" 2>$null
               if ($LASTEXITCODE -ne 0) {
-                python -m pip install playwright
+                Invoke-ProjectPython "-m" "pip" "install" "playwright"
               }
-              python .\discover_maztozi_sources.py `
-                --mode pending `
-                --operation-id "${{ inputs.operation_id }}"
+
+              Invoke-ProjectPython `
+                ".\discover_maztozi_sources.py" `
+                "--mode" `
+                "pending"
               break
             }
+
             "discover_all" {
-              python -c "import playwright" 2>$null
+              & $env:PYTHON_EXE -c "import playwright" 2>$null
               if ($LASTEXITCODE -ne 0) {
-                python -m pip install playwright
+                Invoke-ProjectPython "-m" "pip" "install" "playwright"
               }
-              python .\discover_maztozi_sources.py `
-                --mode all `
-                --operation-id "${{ inputs.operation_id }}"
+
+              Invoke-ProjectPython `
+                ".\discover_maztozi_sources.py" `
+                "--mode" `
+                "all"
               break
             }
+
             default {
               throw "Unsupported operation: $operation"
             }
           }
+
+      - name: Report final result
+        if: always()
+        env:
+          WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
+          WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          $baseUrl = $env:WORKER_SYNC_URL.TrimEnd("/")
+          if ($baseUrl.EndsWith("/sync")) {
+            $baseUrl = $baseUrl.Substring(0, $baseUrl.Length - 5)
+          }
+
+          $headers = @{
+            Authorization = "Bearer $env:WORKER_SYNC_SECRET"
+            "Content-Type" = "application/json; charset=utf-8"
+          }
+
+          $succeeded = "${{ steps.operation.outcome }}" -eq "success"
+          $errorText = if ($succeeded) {
+            ""
+          }
+          else {
+            "????? ?????? ?? GitHub Actions ?????? ???. ????? ????? Workflow ?? ????? ????."
+          }
+
+          $body = @{
+            operation_id = "${{ inputs.operation_id }}"
+            ok = $succeeded
+            error = $errorText
+          } | ConvertTo-Json -Compress
+
+          Invoke-RestMethod `
+            -Method Post `
+            -Uri "$baseUrl/admin/manual-operation-result" `
+            -Headers $headers `
+            -Body $body
