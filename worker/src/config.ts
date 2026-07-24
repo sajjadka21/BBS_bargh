@@ -38,6 +38,7 @@ export const ADMIN_PANEL_BUTTON = "🛡 مدیریت";
 export const ADMIN_STATUS_BUTTON = "📊 وضعیت سامانه";
 export const ADMIN_USERS_BUTTON = "👥 مدیریت کاربران";
 export const ADMIN_CITIES_BUTTON = "🏙 مدیریت شهرها";
+export const ADMIN_UPDATES_BUTTON = "🔄 مرکز بروزرسانی";
 export const ADMIN_SPECIAL_REQUESTS_BUTTON = "⭐ درخواست‌های ویژه";
 export const ADMIN_ADD_CITY_BUTTON = "➕ افزودن شهر";
 export const ADMIN_AUTO_SOURCE_BUTTON = "🔎 کشف خودکار شماره‌ها";
@@ -92,6 +93,7 @@ export function adminMenuKeyboard(): ReplyKeyboardMarkup {
       [{ text: ADMIN_STATUS_BUTTON }],
       [{ text: ADMIN_USERS_BUTTON }],
       [{ text: ADMIN_CITIES_BUTTON }],
+      [{ text: ADMIN_UPDATES_BUTTON }],
       [{ text: ADMIN_SPECIAL_REQUESTS_BUTTON }],
       [{ text: MAIN_MENU_BUTTON }],
     ],

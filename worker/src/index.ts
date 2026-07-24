@@ -23,7 +23,11 @@ import {
   setTelegramWebhook,
 } from "./telegram";
 import { synchronizeSnapshots } from "./sync";
-import { completeManualOperation } from "./manual-operations";
+import {
+  completeManualOperation,
+  markManualOperationStarted,
+  markWaitingManualOperations,
+} from "./manual-operations";
 import {
   listSpecialFetchTargets,
   synchronizeSpecialOutages,
@@ -218,22 +222,149 @@ async function notifyAdminBulkDiscovery(
   });
 }
 
+function manualOperationLabel(
+  operationType: string,
+): string {
+  if (operationType === "fetch_all") {
+    return "بروزرسانی همه";
+  }
+
+  if (
+    operationType === "fetch_cities" ||
+    operationType === "fetch"
+  ) {
+    return "بروزرسانی شهرهای Maztozi";
+  }
+
+  if (operationType === "fetch_special") {
+    return "بروزرسانی استعلام‌های ویژه برق‌من";
+  }
+
+  if (operationType === "discover_pending") {
+    return "کشف شهرهای در انتظار";
+  }
+
+  if (operationType === "discover_all") {
+    return "کشف همه شهرستان‌های Maztozi";
+  }
+
+  return operationType;
+}
+
+async function notifyAdminManualOperationStarted(
+  env: Env,
+  operation: {
+    operation_id: string;
+    operation_type: string;
+    run_url: string;
+  },
+): Promise<void> {
+  const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim() ?? "";
+
+  if (!adminId) {
+    return;
+  }
+
+  await callTelegram(env, "sendMessage", {
+    chat_id: adminId,
+    text: [
+      "▶️ <b>عملیات روی Runner شروع شد</b>",
+      `نوع: ${escapeHtml(
+        manualOperationLabel(operation.operation_type),
+      )}`,
+      `شناسه: <code>${escapeHtml(operation.operation_id)}</code>`,
+      operation.run_url
+        ? `🔗 ${escapeHtml(operation.run_url)}`
+        : "",
+    ].filter(Boolean).join("\n"),
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  });
+}
+
+async function notifyAdminWaitingManualOperations(
+  env: Env,
+): Promise<number> {
+  const waiting = await markWaitingManualOperations(env.DB);
+  const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim() ?? "";
+
+  if (!adminId || waiting.length === 0) {
+    return waiting.length;
+  }
+
+  await callTelegram(env, "sendMessage", {
+    chat_id: adminId,
+    text: [
+      "💻 <b>Runner هنوز در دسترس نیست</b>",
+      "",
+      ...waiting.map(
+        (operation) =>
+          `• ${escapeHtml(
+            manualOperationLabel(operation.operation_type),
+          )} — <code>${escapeHtml(
+            operation.operation_id.slice(0, 8),
+          )}</code>`,
+      ),
+      "",
+      "عملیات در صف GitHub باقی می‌ماند.",
+      "لپ‌تاپ باید روشن، آنلاین و Runner ویندوز در حال اجرا باشد.",
+    ].join("\n"),
+    parse_mode: "HTML",
+  });
+
+  return waiting.length;
+}
+
 async function notifyAdminManualOperationResult(
   env: Env,
-  operationId: string,
+  operation: {
+    operation_id: string;
+    operation_type: string;
+    run_url: string;
+  } | null,
   ok: boolean,
   errorText: string,
 ): Promise<void> {
   const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim() ?? "";
-  if (!adminId) return;
+
+  if (!adminId) {
+    return;
+  }
+
+  const operationId = operation?.operation_id ?? "نامشخص";
+  const operationType = operation?.operation_type ?? "نامشخص";
+  const runUrl = operation?.run_url ?? "";
+
   await callTelegram(env, "sendMessage", {
     chat_id: adminId,
-    text: ok
-      ? `✅ عملیات دستی با موفقیت پایان یافت.\n<code>${escapeHtml(operationId)}</code>`
-      : `⚠️ عملیات دستی ناموفق بود.\n<code>${escapeHtml(operationId)}</code>\n\n${escapeHtml(errorText || "خطای نامشخص")}`,
+    text: [
+      ok
+        ? "✅ <b>عملیات با موفقیت پایان یافت</b>"
+        : "⚠️ <b>عملیات ناموفق بود</b>",
+      `نوع: ${escapeHtml(
+        manualOperationLabel(operationType),
+      )}`,
+      `شناسه: <code>${escapeHtml(operationId)}</code>`,
+      !ok
+        ? `خطا: ${escapeHtml(
+            errorText || "خطای نامشخص",
+          )}`
+        : "",
+      runUrl
+        ? `🔗 ${escapeHtml(runUrl)}`
+        : "",
+    ].filter(Boolean).join("\n"),
     parse_mode: "HTML",
+    disable_web_page_preview: true,
     reply_markup: {
-      inline_keyboard: [[{ text: "🏠 منوی اصلی", callback_data: "go_main" }]],
+      inline_keyboard: [
+        [
+          {
+            text: "🏠 منوی اصلی",
+            callback_data: "go_main",
+          },
+        ],
+      ],
     },
   });
 }
@@ -335,6 +466,68 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   if (
     request.method === "POST" &&
+    url.pathname === "/admin/manual-operation-started"
+  ) {
+    if (!hasBearerSecret(request, env.SYNC_SECRET)) {
+      return unauthorized();
+    }
+
+    const raw = await parseJson(request);
+
+    if (!raw || typeof raw !== "object") {
+      return jsonResponse(
+        { ok: false, error: "JSON object required." },
+        400,
+      );
+    }
+
+    const body = raw as Record<string, unknown>;
+    const operationId = String(
+      body.operation_id ?? "",
+    ).trim();
+    const runUrl = String(
+      body.run_url ?? "",
+    ).trim().slice(0, 1000);
+
+    if (!/^[a-f0-9]{32}$/i.test(operationId)) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "operation_id is invalid.",
+        },
+        400,
+      );
+    }
+
+    const operation = await markManualOperationStarted(
+      env.DB,
+      operationId,
+      runUrl,
+    );
+
+    if (!operation) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "Operation was not found.",
+        },
+        404,
+      );
+    }
+
+    await notifyAdminManualOperationStarted(
+      env,
+      operation,
+    );
+
+    return jsonResponse({
+      ok: true,
+      operation,
+    });
+  }
+
+  if (
+    request.method === "POST" &&
     url.pathname === "/admin/manual-operation-result"
   ) {
     if (!hasBearerSecret(request, env.SYNC_SECRET)) return unauthorized();
@@ -349,9 +542,24 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (!/^[a-f0-9]{32}$/i.test(operationId)) {
       return jsonResponse({ ok: false, error: "operation_id is invalid." }, 400);
     }
-    await completeManualOperation(env.DB, operationId, ok ? "completed" : "failed", errorText);
-    await notifyAdminManualOperationResult(env, operationId, ok, errorText);
-    return jsonResponse({ ok: true });
+    const operation = await completeManualOperation(
+      env.DB,
+      operationId,
+      ok ? "completed" : "failed",
+      errorText,
+    );
+
+    await notifyAdminManualOperationResult(
+      env,
+      operation,
+      ok,
+      errorText,
+    );
+
+    return jsonResponse({
+      ok: true,
+      operation,
+    });
   }
 
   if (request.method === "GET" && url.pathname === "/special/fetch-config") {
@@ -479,9 +687,23 @@ export default {
       Promise.all([
         runScheduledPersonalReminders(env),
         runScheduledSpecialReminders(env),
-      ]).then(([personal, special]) => {
-        console.log("Reminder checks completed", { personal, special });
-      }),
+        notifyAdminWaitingManualOperations(env),
+      ]).then(
+        ([
+          personal,
+          special,
+          waitingOperations,
+        ]) => {
+          console.log(
+            "Scheduled checks completed",
+            {
+              personal,
+              special,
+              waitingOperations,
+            },
+          );
+        },
+      ),
     );
   },
 };
