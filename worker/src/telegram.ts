@@ -3,6 +3,7 @@ import {
   ADMIN_STATUS_BUTTON,
   ADMIN_USERS_BUTTON,
   ADMIN_CITIES_BUTTON,
+  ADMIN_UPDATES_BUTTON,
   ADMIN_SPECIAL_REQUESTS_BUTTON,
   ADMIN_ADD_CITY_BUTTON,
   ADMIN_AUTO_SOURCE_BUTTON,
@@ -52,7 +53,11 @@ import {
   saveManagedCity,
   setAdminFlow,
 } from "./cities";
-import { dispatchManualOperation, type ManualOperationType } from "./manual-operations";
+import {
+  dispatchManualOperation,
+  listManualOperationRuns,
+  type ManualOperationType,
+} from "./manual-operations";
 import {
   clearSpecialLookupFlow,
   createSpecialLookupRequest,
@@ -152,6 +157,11 @@ const ADMIN_HOME_CALLBACK = "admin_home";
 const ADMIN_REFRESH_CALLBACK = "admin_users";
 const ADMIN_STATUS_CALLBACK = "admin_status";
 const ADMIN_CITIES_CALLBACK = "admin_cities";
+const ADMIN_UPDATES_CALLBACK = "admin_updates";
+const ADMIN_UPDATE_STATUS_CALLBACK = "admin_update_status";
+const ADMIN_FETCH_ALL_CALLBACK = "admin_fetch_all";
+const ADMIN_FETCH_CITIES_CALLBACK = "admin_fetch_cities";
+const ADMIN_FETCH_SPECIAL_CALLBACK = "admin_fetch_special";
 const ADMIN_CITY_ADD_CALLBACK = "admin_city_add";
 const ADMIN_CITY_EDIT_PREFIX = "admin_city_edit:";
 const ADMIN_CITY_DISABLE_PREFIX = "admin_city_disable:";
@@ -483,10 +493,224 @@ export async function sendBlocks(
 }
 
 
-function manualOperationLabel(operation: ManualOperationType): string {
-  if (operation === "fetch") return "Fetch کامل خاموشی‌ها";
-  if (operation === "discover_pending") return "کشف شهرهای در انتظار";
-  return "کشف همه شهرهای Maztozi";
+function manualOperationLabel(
+  operation: ManualOperationType | string,
+): string {
+  if (operation === "fetch_all") {
+    return "بروزرسانی همه";
+  }
+
+  if (
+    operation === "fetch_cities" ||
+    operation === "fetch"
+  ) {
+    return "بروزرسانی شهرهای Maztozi";
+  }
+
+  if (operation === "fetch_special") {
+    return "بروزرسانی استعلام‌های ویژه برق‌من";
+  }
+
+  if (operation === "discover_pending") {
+    return "کشف شهرهای در انتظار";
+  }
+
+  if (operation === "discover_all") {
+    return "کشف همه شهرستان‌های Maztozi";
+  }
+
+  return operation;
+}
+
+function manualOperationStatusLabel(
+  status: string,
+): string {
+  if (status === "dispatching") {
+    return "در حال ارسال به GitHub";
+  }
+
+  if (status === "queued") {
+    return "در صف GitHub";
+  }
+
+  if (status === "waiting_for_runner") {
+    return "در انتظار Runner";
+  }
+
+  if (status === "running") {
+    return "در حال اجرا";
+  }
+
+  if (status === "completed") {
+    return "موفق";
+  }
+
+  if (status === "failed") {
+    return "ناموفق";
+  }
+
+  return status || "نامشخص";
+}
+
+function manualOperationStatusEmoji(
+  status: string,
+): string {
+  if (status === "completed") {
+    return "✅";
+  }
+
+  if (status === "failed") {
+    return "❌";
+  }
+
+  if (status === "running") {
+    return "▶️";
+  }
+
+  if (status === "waiting_for_runner") {
+    return "💻";
+  }
+
+  if (
+    status === "queued" ||
+    status === "dispatching"
+  ) {
+    return "⏳";
+  }
+
+  return "⚪️";
+}
+
+function updateCenterKeyboard(): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "🚀 بروزرسانی همه",
+          callback_data: ADMIN_FETCH_ALL_CALLBACK,
+        },
+      ],
+      [
+        {
+          text: "🏙 بروزرسانی شهرهای Maztozi",
+          callback_data: ADMIN_FETCH_CITIES_CALLBACK,
+        },
+      ],
+      [
+        {
+          text: "⭐ بروزرسانی استعلام‌های ویژه",
+          callback_data: ADMIN_FETCH_SPECIAL_CALLBACK,
+        },
+      ],
+      [
+        {
+          text: "🔎 کشف شهرهای در انتظار",
+          callback_data: ADMIN_DISCOVER_PENDING_CALLBACK,
+        },
+      ],
+      [
+        {
+          text: "🌐 کشف همه شهرستان‌های Maztozi",
+          callback_data: ADMIN_DISCOVER_ALL_CALLBACK,
+        },
+      ],
+      [
+        {
+          text: "📋 بازخوانی وضعیت عملیات",
+          callback_data: ADMIN_UPDATE_STATUS_CALLBACK,
+        },
+      ],
+      [
+        {
+          text: "⬅️ پنل مدیریت",
+          callback_data: ADMIN_HOME_CALLBACK,
+        },
+      ],
+      [
+        {
+          text: "🏠 منوی اصلی",
+          callback_data: MAIN_MENU_CALLBACK,
+        },
+      ],
+    ],
+  };
+}
+
+async function openAdminUpdateCenter(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+): Promise<void> {
+  if (!isAdmin(env, telegramUserId)) {
+    await sendMessage(
+      env,
+      chatId,
+      "دسترسی مدیریت برای این حساب فعال نیست.",
+    );
+    return;
+  }
+
+  const operations = await listManualOperationRuns(
+    env.DB,
+    6,
+  );
+
+  const operationBlocks =
+    operations.length === 0
+      ? ["هنوز عملیات دستی ثبت نشده است."]
+      : operations.map((operation) => {
+          const lines = [
+            `${manualOperationStatusEmoji(
+              operation.status,
+            )} <b>${escapeHtml(
+              manualOperationLabel(
+                operation.operation_type,
+              ),
+            )}</b>`,
+            `وضعیت: ${escapeHtml(
+              manualOperationStatusLabel(
+                operation.status,
+              ),
+            )}`,
+            `شناسه: <code>${escapeHtml(
+              operation.operation_id.slice(0, 8),
+            )}</code>`,
+            `آخرین تغییر: ${escapeHtml(
+              formatTehranDateTime(
+                operation.updated_at,
+              ),
+            )}`,
+          ];
+
+          if (
+            operation.status === "failed" &&
+            operation.error_text
+          ) {
+            lines.push(
+              `خطا: ${escapeHtml(
+                operation.error_text.slice(0, 300),
+              )}`,
+            );
+          }
+
+          return lines.join("\n");
+        });
+
+  await sendMessage(
+    env,
+    chatId,
+    [
+      "🔄 <b>مرکز بروزرسانی</b>",
+      "",
+      "عملیات‌ها روی Self-hosted Runner ویندوز اجرا می‌شوند.",
+      "اگر لپ‌تاپ یا Runner خاموش باشد، درخواست در صف GitHub باقی می‌ماند.",
+      "",
+      "📋 <b>آخرین عملیات‌ها</b>",
+      "",
+      ...operationBlocks,
+    ].join("\n\n"),
+    updateCenterKeyboard(),
+  );
 }
 
 async function showManualOperationConfirmation(
@@ -494,32 +718,69 @@ async function showManualOperationConfirmation(
   chatId: string,
   operation: ManualOperationType,
 ): Promise<void> {
-  const warnings = operation === "fetch"
-    ? "تمام شهرهای فعال همین حالا Fetch و با سیاست Snapshot همگام می‌شوند."
-    : operation === "discover_pending"
-      ? "فقط شهرهایی که خودتان درخواست کشف داده‌اید بررسی می‌شوند."
-      : "مرورگر همه شهرستان‌های Maztozi را بررسی می‌کند. نتیجه بدون تأیید شما اعمال نمی‌شود.";
+  let warning: string;
+
+  if (operation === "fetch_all") {
+    warning = [
+      "ابتدا خاموشی شهرهای Maztozi دریافت می‌شود.",
+      "سپس تمام استعلام‌های ویژه فعال برق‌من بروزرسانی می‌شوند.",
+    ].join(" ");
+  } else if (
+    operation === "fetch_cities" ||
+    operation === "fetch"
+  ) {
+    warning =
+      "فقط خاموشی شهرهای فعال Maztozi دریافت و با منطق افزایشی همگام می‌شوند. غیبت یک بلوک باعث حذف آن نمی‌شود.";
+  } else if (operation === "fetch_special") {
+    warning =
+      "فقط درخواست‌های فعال و تأییدشده برق‌من بررسی می‌شوند.";
+  } else if (operation === "discover_pending") {
+    warning =
+      "فقط شهرهایی که برای آن‌ها درخواست کشف ثبت شده بررسی می‌شوند.";
+  } else {
+    warning =
+      "مرورگر همه شهرستان‌های Maztozi را بررسی می‌کند. نتیجه بدون تأیید مدیر اعمال نمی‌شود.";
+  }
+
   await sendMessage(
     env,
     chatId,
     [
-      "⚠️ <b>تأیید عملیات دستی</b>",
-      `عملیات: <b>${manualOperationLabel(operation)}</b>`,
+      "⚠️ <b>تأیید عملیات</b>",
+      `عملیات: <b>${escapeHtml(
+        manualOperationLabel(operation),
+      )}</b>`,
       "",
-      warnings,
+      warning,
       "",
       "Self-hosted Runner باید روشن و آنلاین باشد.",
+      "در صورت خاموش‌بودن Runner، درخواست در صف باقی می‌ماند.",
     ].join("\n"),
     {
       inline_keyboard: [
         [
           {
             text: "✅ بله، اجرا شود",
-            callback_data: `${ADMIN_OPERATION_CONFIRM_PREFIX}${operation}`,
+            callback_data:
+              `${ADMIN_OPERATION_CONFIRM_PREFIX}${operation}`,
           },
-          { text: "❌ انصراف", callback_data: ADMIN_CITIES_CALLBACK },
+          {
+            text: "❌ انصراف",
+            callback_data: ADMIN_UPDATES_CALLBACK,
+          },
         ],
-        [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+        [
+          {
+            text: "⬅️ مرکز بروزرسانی",
+            callback_data: ADMIN_UPDATES_CALLBACK,
+          },
+        ],
+        [
+          {
+            text: "🏠 منوی اصلی",
+            callback_data: MAIN_MENU_CALLBACK,
+          },
+        ],
       ],
     },
   );
@@ -909,7 +1170,7 @@ async function showAdminSpecialRequest(
       `👤 <b>کاربر:</b> <code>${request.telegram_user_id}</code>`,
       specialRequestSummary(request),
       "",
-      "تأیید این مرحله فقط یعنی درخواست از نظر شما قابل پیگیری است. اتصال خودکار بعد از ساخت Adapter همان سامانه آغاز می‌شود.",
+      "با تأیید، درخواست فعال می‌شود و در اجرای بعدی استعلام ویژه برق‌من بررسی خواهد شد.",
     ].join("\n"),
     {
       inline_keyboard: [
@@ -921,7 +1182,7 @@ async function showAdminSpecialRequest(
         ],
         [
           {
-            text: "✅ قابل پیگیری است",
+            text: "✅ تأیید و فعال‌سازی",
             callback_data: `${ADMIN_SPECIAL_APPROVE_PREFIX}${request.request_id}`,
           },
           {
@@ -2194,12 +2455,18 @@ async function openAdminCities(
   }
   const cities = await listManagedCities(env.DB);
   const rows: InlineKeyboardMarkup["inline_keyboard"] = [
-    [{ text: "➕ افزودن شهر", callback_data: ADMIN_CITY_ADD_CALLBACK }],
     [
-      { text: "🔄 Fetch کامل الان", callback_data: ADMIN_MANUAL_FETCH_CALLBACK },
-      { text: "🔎 کشف شهرهای منتظر", callback_data: ADMIN_DISCOVER_PENDING_CALLBACK },
+      {
+        text: "➕ افزودن شهر",
+        callback_data: ADMIN_CITY_ADD_CALLBACK,
+      },
     ],
-    [{ text: "🌐 کشف همه شهرهای Maztozi", callback_data: ADMIN_DISCOVER_ALL_CALLBACK }],
+    [
+      {
+        text: "🔄 مرکز بروزرسانی",
+        callback_data: ADMIN_UPDATES_CALLBACK,
+      },
+    ],
   ];
   for (const city of cities) {
     rows.push([
@@ -2231,7 +2498,7 @@ async function openAdminCities(
       details,
       "",
       "برای تغییر شماره‌ها روی نام شهر بزنید. غیرفعال‌سازی، شهر را از منو و Fetch حذف می‌کند ولی تاریخچه و پروفایل‌ها را پاک نمی‌کند.",
-      "کشف و Fetch دستی فقط با درخواست شما اجرا می‌شود و هر بار تأیید جداگانه دارد.",
+      "برای بروزرسانی، کشف شناسه‌ها و مشاهده وضعیت Runner از «مرکز بروزرسانی» استفاده کنید.",
     ].join("\n"),
     { inline_keyboard: rows },
   );
@@ -2907,6 +3174,11 @@ async function handleCallbackQuery(
     data === ADMIN_REFRESH_CALLBACK ||
     data === ADMIN_STATUS_CALLBACK ||
     data === ADMIN_CITIES_CALLBACK ||
+    data === ADMIN_UPDATES_CALLBACK ||
+    data === ADMIN_UPDATE_STATUS_CALLBACK ||
+    data === ADMIN_FETCH_ALL_CALLBACK ||
+    data === ADMIN_FETCH_CITIES_CALLBACK ||
+    data === ADMIN_FETCH_SPECIAL_CALLBACK ||
     data === ADMIN_CITY_ADD_CALLBACK ||
     data === ADMIN_CITY_SAVE_CONFIRM_CALLBACK ||
     data === ADMIN_CITY_DISCOVERY_CONFIRM_CALLBACK ||
@@ -2926,6 +3198,8 @@ async function handleCallbackQuery(
     data.startsWith(ADMIN_SPECIAL_REVEAL_CONFIRM_PREFIX) ||
     data.startsWith(SUPPORT_TETHER_APPROVE_PREFIX) ||
     data.startsWith(SUPPORT_TETHER_REJECT_PREFIX) ||
+    data.startsWith(SUPPORT_TETHER_APPROVE_CONFIRM_PREFIX) ||
+    data.startsWith(SUPPORT_TETHER_REJECT_CONFIRM_PREFIX) ||
     data.startsWith(ADMIN_REVOKE_PREFIX) ||
     data.startsWith(ADMIN_REVOKE_CONFIRM_PREFIX) ||
     data.startsWith(ADMIN_CITY_EDIT_PREFIX) ||
@@ -2972,6 +3246,28 @@ async function handleCallbackQuery(
       await openAdminCities(env, chatId, telegramUserId);
       return;
     }
+    if (
+      data === ADMIN_UPDATES_CALLBACK ||
+      data === ADMIN_UPDATE_STATUS_CALLBACK
+    ) {
+      await clearAdminFlow(env.DB, telegramUserId);
+
+      await answerCallbackQuery(
+        env,
+        callbackQuery.id,
+        data === ADMIN_UPDATE_STATUS_CALLBACK
+          ? "وضعیت عملیات‌ها بازخوانی شد."
+          : "مرکز بروزرسانی",
+      );
+
+      await openAdminUpdateCenter(
+        env,
+        chatId,
+        telegramUserId,
+      );
+
+      return;
+    }
     if (data === ADMIN_SPECIAL_CALLBACK) {
       await answerCallbackQuery(env, callbackQuery.id, "درخواست‌های ویژه");
       await openAdminSpecialRequests(env, chatId, telegramUserId);
@@ -2979,21 +3275,58 @@ async function handleCallbackQuery(
     }
     if (
       data === ADMIN_MANUAL_FETCH_CALLBACK ||
+      data === ADMIN_FETCH_ALL_CALLBACK ||
+      data === ADMIN_FETCH_CITIES_CALLBACK ||
+      data === ADMIN_FETCH_SPECIAL_CALLBACK ||
       data === ADMIN_DISCOVER_PENDING_CALLBACK ||
       data === ADMIN_DISCOVER_ALL_CALLBACK
     ) {
-      const operation: ManualOperationType = data === ADMIN_MANUAL_FETCH_CALLBACK
-        ? "fetch"
-        : data === ADMIN_DISCOVER_PENDING_CALLBACK
-          ? "discover_pending"
-          : "discover_all";
-      await answerCallbackQuery(env, callbackQuery.id);
-      await showManualOperationConfirmation(env, chatId, operation);
+      let operation: ManualOperationType;
+
+      if (data === ADMIN_FETCH_ALL_CALLBACK) {
+        operation = "fetch_all";
+      } else if (
+        data === ADMIN_FETCH_CITIES_CALLBACK ||
+        data === ADMIN_MANUAL_FETCH_CALLBACK
+      ) {
+        operation = "fetch_cities";
+      } else if (
+        data === ADMIN_FETCH_SPECIAL_CALLBACK
+      ) {
+        operation = "fetch_special";
+      } else if (
+        data === ADMIN_DISCOVER_PENDING_CALLBACK
+      ) {
+        operation = "discover_pending";
+      } else {
+        operation = "discover_all";
+      }
+
+      await answerCallbackQuery(
+        env,
+        callbackQuery.id,
+      );
+
+      await showManualOperationConfirmation(
+        env,
+        chatId,
+        operation,
+      );
+
       return;
     }
     if (data.startsWith(ADMIN_OPERATION_CONFIRM_PREFIX)) {
       const candidate = data.slice(ADMIN_OPERATION_CONFIRM_PREFIX.length);
-      if (!["fetch", "discover_pending", "discover_all"].includes(candidate)) {
+      if (
+        ![
+          "fetch",
+          "fetch_all",
+          "fetch_cities",
+          "fetch_special",
+          "discover_pending",
+          "discover_all",
+        ].includes(candidate)
+      ) {
         await answerCallbackQuery(env, callbackQuery.id, "عملیات نامعتبر است.", true);
         return;
       }
@@ -3009,9 +3342,10 @@ async function handleCallbackQuery(
             `نوع: ${manualOperationLabel(operation)}`,
             `شناسه: <code>${result.operationId}</code>`,
             "",
-            "اگر Runner روشن باشد، اجرا معمولاً ظرف چند ثانیه شروع می‌شود و پایان کار در همین چت اعلام خواهد شد.",
+            "اگر Runner روشن باشد، اجرا معمولاً ظرف چند ثانیه شروع می‌شود.",
+            "شروع، پایان یا خطای عملیات در همین چت اعلام خواهد شد.",
           ].join("\n"),
-          adminMenuKeyboard(),
+          updateCenterKeyboard(),
         );
       } catch (error) {
         await sendMessage(
@@ -3783,6 +4117,17 @@ async function handleTextMessage(
   if (text === ADMIN_CITIES_BUTTON) {
     if (!telegramUserId) return;
     await openAdminCities(env, chatId, telegramUserId);
+    return;
+  }
+  if (text === ADMIN_UPDATES_BUTTON) {
+    if (!telegramUserId) return;
+
+    await openAdminUpdateCenter(
+      env,
+      chatId,
+      telegramUserId,
+    );
+
     return;
   }
 
