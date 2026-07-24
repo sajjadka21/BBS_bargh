@@ -30,4 +30,16 @@ CITIES = [
         "source_city_ids": [31, 32, 34],
         "pgds": "",
     },
+    {
+        "key": "amol",
+        "label": "آمل",
+        "source_city_ids": [71, 72, 73, 74, 75, 76],
+        "pgds": "",
+    },
+    {
+        "key": "behshahr",
+        "label": "بهشهر",
+        "source_city_ids": [22, 23, 26],
+        "pgds": "",
+    },
 ]

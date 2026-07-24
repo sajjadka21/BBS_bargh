@@ -68,6 +68,16 @@ import {
   type SpecialLookupRequest,
 } from "./special-requests";
 import {
+  getUserSpecialRequestWithOutages,
+  listDueSpecialReminders,
+  recordSpecialChangeEvent,
+  recordSpecialReminder,
+  setSpecialReminderMinutes,
+  type ProviderHealthUpdate,
+  type SpecialOutageRow,
+  type SpecialSyncChange,
+} from "./special-outages";
+import {
   clearSupportFlow,
   createTetherSubmission,
   decideTetherSubmission,
@@ -170,6 +180,9 @@ const SPECIAL_HOME_CALLBACK = "special_home";
 const SPECIAL_ADD_CALLBACK = "special_add";
 const SPECIAL_SUBMIT_CALLBACK = "special_submit_yes";
 const SPECIAL_CANCEL_CALLBACK = "special_cancel";
+const SPECIAL_VIEW_PREFIX = "special_view:";
+const SPECIAL_REMINDER_PREFIX = "special_reminder:";
+const SPECIAL_REMINDER_SET_PREFIX = "special_reminder_set:";
 const SUPPORT_HOME_CALLBACK = "support_home";
 const SUPPORT_STARS_PREFIX = "support_stars:";
 const SUPPORT_TETHER_CALLBACK = "support_tether";
@@ -514,8 +527,8 @@ async function showManualOperationConfirmation(
 
 function specialStatusLabel(status: string): string {
   if (status === "pending") return "در انتظار بررسی مدیر";
-  if (status === "approved") return "پذیرفته‌شده برای اتصال فنی";
-  if (status === "active") return "فعال";
+  if (status === "approved") return "پذیرفته‌شده";
+  if (status === "active") return "فعال و قابل استعلام";
   if (status === "rejected") return "امکان پشتیبانی ندارد";
   return status;
 }
@@ -530,6 +543,24 @@ function specialRequestSummary(request: SpecialLookupRequest): string {
   ].join("\n");
 }
 
+function specialReminderLabel(minutes: number): string {
+  if (minutes === 30) return "۳۰ دقیقه قبل";
+  if (minutes === 60) return "۶۰ دقیقه قبل";
+  return "خاموش";
+}
+
+function formatSpecialOutageBlock(row: SpecialOutageRow): string {
+  const lines = [
+    row.outage_date ? `📅 <b>تاریخ:</b> ${escapeHtml(row.outage_date)}` : "",
+    row.from_time || row.to_time
+      ? `🕒 <b>زمان:</b> ${escapeHtml(row.from_time || "اعلام نشده")} تا ${escapeHtml(row.to_time || "اعلام نشده")}`
+      : "",
+    row.address ? `📍 <b>آدرس:</b> ${escapeHtml(row.address)}` : "",
+    row.description ? `📝 <b>توضیح:</b> ${escapeHtml(row.description)}` : "",
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
 async function openSpecialLookupHome(
   env: Env,
   chatId: string,
@@ -542,23 +573,141 @@ async function openSpecialLookupHome(
         "",
         "درخواست‌های شما:",
         ...requests.map((request, index) =>
-          `${toPersianDigits(index + 1)}. ${escapeHtml(request.request_label)} — ${escapeHtml(specialStatusLabel(request.status))} — ${maskBillId(request.bill_id_last4)}`,
+          `${toPersianDigits(index + 1)}. ${escapeHtml(request.request_label)} — ${escapeHtml(specialStatusLabel(request.status))} — ${maskBillId(request.bill_id_last4)}${request.status === "active" ? ` — یادآوری: ${specialReminderLabel(request.reminder_minutes)}` : ""}`,
         ),
         "",
-        "ثبت درخواست به معنی فعال‌شدن خودکار نیست؛ ابتدا مدیر سامانه استان را بررسی می‌کند.",
+        "درخواست فعال از آخرین داده ذخیره‌شده پاسخ می‌دهد و پس از هر Fetch به‌روزرسانی می‌شود.",
       ].join("\n")
     : [
         "⭐ <b>استعلام ویژه با شناسه قبض</b>",
         "",
-        "استان، شهرستان و شناسه قبض را ثبت می‌کنید. مدیر بررسی می‌کند آیا سامانه رسمی آن منطقه بدون مانع احراز هویت قابل اتصال است یا نه.",
+        "شناسه قبض را ثبت می‌کنید. پس از تأیید مدیر، استعلام دستی و یادآوری ۳۰ یا ۶۰ دقیقه‌ای فعال می‌شود.",
       ].join("\n");
-  await sendMessage(env, chatId, text, {
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
+  for (const request of requests) {
+    if (request.status === "active") {
+      rows.push([
+        {
+          text: `🔎 ${request.request_label.slice(0, 20)}`,
+          callback_data: `${SPECIAL_VIEW_PREFIX}${request.request_id}`,
+        },
+        {
+          text: "⏰ یادآوری",
+          callback_data: `${SPECIAL_REMINDER_PREFIX}${request.request_id}`,
+        },
+      ]);
+    }
+  }
+  rows.push([{ text: "➕ ثبت درخواست جدید", callback_data: SPECIAL_ADD_CALLBACK }]);
+  rows.push([{ text: "🔄 تازه‌سازی", callback_data: SPECIAL_HOME_CALLBACK }]);
+  rows.push([{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }]);
+  await sendMessage(env, chatId, text, { inline_keyboard: rows });
+}
+
+async function openSpecialLookupResult(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+  requestId: string,
+): Promise<void> {
+  const request = await getUserSpecialRequestWithOutages(
+    env.DB,
+    requestId,
+    telegramUserId,
+  );
+  if (!request) {
+    await sendMessage(env, chatId, "درخواست پیدا نشد یا متعلق به این حساب نیست.");
+    return;
+  }
+  const keyboard: InlineKeyboardMarkup = {
     inline_keyboard: [
-      [{ text: "➕ ثبت درخواست جدید", callback_data: SPECIAL_ADD_CALLBACK }],
-      [{ text: "🔄 تازه‌سازی", callback_data: SPECIAL_HOME_CALLBACK }],
+      [{ text: "⏰ تنظیم یادآوری", callback_data: `${SPECIAL_REMINDER_PREFIX}${requestId}` }],
+      [{ text: "🔄 تازه‌سازی", callback_data: `${SPECIAL_VIEW_PREFIX}${requestId}` }],
+      [{ text: "⬅️ درخواست‌های ویژه", callback_data: SPECIAL_HOME_CALLBACK }],
       [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
     ],
-  });
+  };
+  if (request.status !== "active") {
+    await sendMessage(
+      env,
+      chatId,
+      `${specialRequestSummary(request)}\n\nاین درخواست هنوز فعال نیست.`,
+      keyboard,
+    );
+    return;
+  }
+  if (request.last_fetch_status !== "ok") {
+    const detail = request.last_error
+      ? `\n📝 ${escapeHtml(request.last_error)}`
+      : "";
+    await sendMessage(
+      env,
+      chatId,
+      [
+        `⭐ <b>${escapeHtml(request.request_label)}</b>`,
+        `📌 وضعیت Fetch: ${escapeHtml(request.last_fetch_status === "never" ? "هنوز اجرا نشده" : request.last_fetch_status)}`,
+        request.last_fetched_at
+          ? `🕒 آخرین تلاش: ${escapeHtml(formatTehranDateTime(request.last_fetched_at))}`
+          : "",
+        detail,
+      ].filter(Boolean).join("\n"),
+      keyboard,
+    );
+    return;
+  }
+  if (request.outages.length === 0) {
+    await sendMessage(
+      env,
+      chatId,
+      [
+        `✅ <b>${escapeHtml(request.request_label)}</b>`,
+        "در آخرین استعلام، خاموشی برنامه‌ریزی‌شده‌ای برای این قبض گزارش نشده است.",
+        request.last_fetched_at
+          ? `🕒 آخرین به‌روزرسانی: ${escapeHtml(formatTehranDateTime(request.last_fetched_at))}`
+          : "",
+      ].filter(Boolean).join("\n"),
+      keyboard,
+    );
+    return;
+  }
+  await sendBlocks(
+    env,
+    chatId,
+    [
+      `⭐ <b>خاموشی ${escapeHtml(request.request_label)}</b>`,
+      ...request.outages.map(formatSpecialOutageBlock),
+    ],
+    keyboard,
+  );
+}
+
+async function openSpecialReminderMenu(
+  env: Env,
+  chatId: string,
+  telegramUserId: string,
+  requestId: string,
+): Promise<void> {
+  const request = await getUserSpecialRequestWithOutages(env.DB, requestId, telegramUserId);
+  if (!request || request.status !== "active") {
+    await sendMessage(env, chatId, "این اشتراک فعال نیست یا متعلق به این حساب نیست.");
+    return;
+  }
+  await sendMessage(
+    env,
+    chatId,
+    `⏰ <b>یادآوری ${escapeHtml(request.request_label)}</b>\n\nتنظیم فعلی: <b>${specialReminderLabel(request.reminder_minutes)}</b>`,
+    {
+      inline_keyboard: [
+        [
+          { text: "۳۰ دقیقه", callback_data: `${SPECIAL_REMINDER_SET_PREFIX}${requestId}:30` },
+          { text: "۶۰ دقیقه", callback_data: `${SPECIAL_REMINDER_SET_PREFIX}${requestId}:60` },
+        ],
+        [{ text: "خاموش", callback_data: `${SPECIAL_REMINDER_SET_PREFIX}${requestId}:0` }],
+        [{ text: "⬅️ بازگشت", callback_data: `${SPECIAL_VIEW_PREFIX}${requestId}` }],
+        [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+      ],
+    },
+  );
 }
 
 async function beginSpecialLookupRequest(
@@ -1194,7 +1343,6 @@ function outageComparableSignature(row: OutageRow): string {
     from: row.from_time,
     to: row.to_time,
     type: row.outage_type,
-    numbers: parseStoredStringArray(row.outage_numbers).sort(),
   });
 }
 
@@ -1245,12 +1393,6 @@ function formatPersonalChangeEvent(
     lines.push(
       `🕒 قبلی: ${escapeHtml(previous.from_time || "اعلام نشده")} تا ${escapeHtml(previous.to_time || "اعلام نشده")}`,
       `🕒 جدید: ${escapeHtml(current.from_time || "اعلام نشده")} تا ${escapeHtml(current.to_time || "اعلام نشده")}`,
-    );
-  }
-  if (previous.outage_numbers !== current.outage_numbers) {
-    lines.push(
-      `🔢 شماره قبلی: ${escapeHtml(formatNumberList(previous.outage_numbers))}`,
-      `🔢 شماره جدید: ${escapeHtml(formatNumberList(current.outage_numbers))}`,
     );
   }
   if (previous.outage_type !== current.outage_type) {
@@ -1501,6 +1643,122 @@ export async function runScheduledPersonalReminders(
   return { usersNotified, remindersSent, errors };
 }
 
+export async function notifySpecialOutageChanges(
+  env: Env,
+  changes: SpecialSyncChange[],
+): Promise<{ usersNotified: number; eventsRecorded: number; errors: string[] }> {
+  let usersNotified = 0;
+  let eventsRecorded = 0;
+  const errors: string[] = [];
+  for (const change of changes) {
+    const heading = change.eventType === "initial"
+      ? "⭐ <b>برنامه خاموشی ویژه ثبت شد</b>"
+      : change.eventType === "cleared"
+        ? "✅ <b>برنامه خاموشی ویژه حذف شد</b>"
+        : "🔄 <b>برنامه خاموشی ویژه تغییر کرد</b>";
+    const blocks = change.current.length > 0
+      ? change.current.map(formatSpecialOutageBlock)
+      : ["در آخرین استعلام، خاموشی برنامه‌ریزی‌شده‌ای گزارش نشد."];
+    try {
+      await sendBlocks(
+        env,
+        change.request.chat_id,
+        [
+          heading,
+          `🏷 <b>${escapeHtml(change.request.request_label)}</b>`,
+          ...blocks,
+        ],
+        {
+          inline_keyboard: [
+            [{
+              text: "🔎 مشاهده آخرین نتیجه",
+              callback_data: `${SPECIAL_VIEW_PREFIX}${change.request.request_id}`,
+            }],
+            [{ text: "🏠 منوی اصلی", callback_data: MAIN_MENU_CALLBACK }],
+          ],
+        },
+      );
+      await recordSpecialChangeEvent(env.DB, change);
+      usersNotified += 1;
+      eventsRecorded += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Telegram error";
+      errors.push(`${change.request.telegram_user_id}: ${message}`);
+      console.error("Special outage change notification failed:", error);
+    }
+  }
+  return { usersNotified, eventsRecorded, errors };
+}
+
+export async function runScheduledSpecialReminders(
+  env: Env,
+): Promise<{ usersNotified: number; remindersSent: number; errors: string[] }> {
+  const due = await listDueSpecialReminders(env.DB);
+  const grouped = new Map<string, typeof due>();
+  for (const item of due) {
+    const current = grouped.get(item.request.telegram_user_id) ?? [];
+    current.push(item);
+    grouped.set(item.request.telegram_user_id, current);
+  }
+  let usersNotified = 0;
+  let remindersSent = 0;
+  const errors: string[] = [];
+  for (const [telegramUserId, items] of grouped) {
+    const first = items[0];
+    if (!first) continue;
+    try {
+      await sendBlocks(env, first.request.chat_id, [
+        "⏰ <b>یادآوری خاموشی ویژه</b>",
+        ...items.map((item) => [
+          `🏷 <b>${escapeHtml(item.request.request_label)}</b>`,
+          formatSpecialOutageBlock(item.outage),
+          `⌛️ شروع حدود ${toPersianDigits(item.minutes_until)} دقیقه دیگر`,
+        ].join("\n")),
+      ]);
+      for (const item of items) {
+        await recordSpecialReminder(
+          env.DB,
+          item.request.request_id,
+          item.outage.outage_key,
+          item.request.reminder_minutes,
+        );
+      }
+      usersNotified += 1;
+      remindersSent += items.length;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Telegram error";
+      errors.push(`${telegramUserId}: ${message}`);
+      console.error("Special outage reminder failed:", error);
+    }
+  }
+  return { usersNotified, remindersSent, errors };
+}
+
+export async function notifyAdminProviderHealth(
+  env: Env,
+  health: ProviderHealthUpdate,
+): Promise<void> {
+  if (!health.should_notify_admin) return;
+  const adminId = env.ADMIN_TELEGRAM_USER_ID?.trim();
+  if (!adminId) return;
+  await sendMessage(
+    env,
+    adminId,
+    [
+      "⚠️ <b>نیاز به ورود دوباره برق‌من</b>",
+      `🔌 <b>ارائه‌دهنده:</b> ${escapeHtml(health.provider_key)}`,
+      `📌 <b>وضعیت:</b> ${escapeHtml(health.status)}`,
+      health.token_expires_at
+        ? `⏳ <b>انقضای توکن:</b> ${escapeHtml(formatTehranDateTime(health.token_expires_at))}`
+        : "",
+      health.detail ? `📝 ${escapeHtml(health.detail)}` : "",
+      "",
+      "روی رایانه شخصی اسکریپت bargheman_bootstrap.py را دوباره اجرا کنید تا Secretهای GitHub به‌روزرسانی شوند.",
+    ].filter(Boolean).join("\n"),
+    adminMenuKeyboard(),
+  );
+}
+
 function secureTextEquals(left: string, right: string): boolean {
   const encoder = new TextEncoder();
   const leftBytes = encoder.encode(left);
@@ -1542,7 +1800,9 @@ function mainMenuFor(env: Env, telegramUserId: string | null) {
 }
 
 function profileModeLabel(mode: PersonalMatchMode): string {
-  return mode === "outage_number" ? "شماره خاموشی" : "کلمه آدرس";
+  return mode === "outage_number"
+    ? "شماره خاموشی (کد ابتدای آدرس)"
+    : "کلمه آدرس";
 }
 
 function reminderLabel(minutes: number): string {
@@ -2265,7 +2525,7 @@ async function openAdminSystemStatus(
       `₮ <b>تتر در انتظار تأیید:</b> ${toPersianDigits(stats.pending_tether_submissions)}`,
       `🧰 <b>عملیات دستی در ۲۴ ساعت:</b> ${toPersianDigits(stats.manual_operations_24h)}`,
       `🗄 <b>رکوردهای آرشیو:</b> ${toPersianDigits(stats.archived_outages)}`,
-      `🔢 <b>مشاهدات شماره خاموشی:</b> ${toPersianDigits(stats.outage_number_observations)}`,
+      `🔢 <b>مشاهدات کد ابتدای آدرس:</b> ${toPersianDigits(stats.outage_number_observations)}`,
       staleCities.length > 0
         ? `⚠️ <b>شهرهای بدون Fetch تازه:</b> ${staleCities.map((status) => escapeHtml(cityByKey(status.city_key)?.label ?? status.city_key)).join("، ")}`
         : "✅ همه شهرها در بازه مورد انتظار به‌روز شده‌اند.",
@@ -2428,7 +2688,7 @@ async function handlePersonalizationFlow(
       env,
       chatId,
       mode === "outage_number"
-        ? "شماره خاموشی را دقیق وارد کنید. ارقام فارسی یا انگلیسی پذیرفته می‌شوند."
+        ? "کد عددی ابتدای آدرس را وارد کنید؛ مثلاً برای «۱۵۳ - شهرک المپیک» عدد ۱۵۳. ارقام فارسی یا انگلیسی پذیرفته می‌شوند."
         : "بخشی از آدرس را وارد کنید؛ مثلاً نام خیابان، روستا یا محله.",
     );
     return true;
@@ -2453,11 +2713,11 @@ async function handlePersonalizationFlow(
     let matchValue = "";
     if (flow.match_mode === "outage_number") {
       matchValue = normalizeOutageNumber(text);
-      if (!/^\d{3,50}$/.test(matchValue)) {
+      if (!/^\d{1,8}$/.test(matchValue)) {
         await sendMessage(
           env,
           chatId,
-          "شماره خاموشی باید فقط شامل ۳ تا ۵۰ رقم باشد. دوباره ارسال کنید.",
+          "کد ابتدای آدرس باید فقط شامل ۱ تا ۸ رقم باشد. دوباره ارسال کنید.",
         );
         return true;
       }
@@ -2860,14 +3120,14 @@ ${escapeHtml(error instanceof Error ? error.message : "خطای نامشخص")}`
       const request = await decideSpecialLookupRequest(
         env.DB,
         requestId,
-        approved ? "approved" : "rejected",
+        approved ? "active" : "rejected",
       );
       await answerCallbackQuery(env, callbackQuery.id, approved ? "درخواست پذیرفته شد." : "درخواست رد شد.");
       await sendMessage(
         env,
         request.chat_id,
         approved
-          ? `✅ درخواست ویژه «${escapeHtml(request.request_label)}» برای بررسی و اتصال فنی پذیرفته شد. پس از آماده‌شدن سامانه ارائه‌دهنده، فعال‌شدن اعلان‌ها جداگانه اطلاع داده می‌شود.`
+          ? `✅ استعلام ویژه «${escapeHtml(request.request_label)}» فعال شد. از بخش استعلام ویژه می‌توانید آخرین نتیجه را ببینید و یادآوری ۳۰ یا ۶۰ دقیقه‌ای را تنظیم کنید.`
           : `❌ در حال حاضر امکان پشتیبانی خودکار از درخواست «${escapeHtml(request.request_label)}» فراهم نشد.`,
         mainMenuFor(env, request.telegram_user_id),
       );
@@ -2895,7 +3155,7 @@ ${escapeHtml(error instanceof Error ? error.message : "خطای نامشخص")}`
           specialRequestSummary(request),
           "",
           approved
-            ? "درخواست برای بررسی و ساخت اتصال فنی پذیرفته شود؟ این تأیید هنوز به معنی فعال‌شدن اعلان خودکار نیست."
+            ? "این شناسه قبض فعال شود؟ بعد از تأیید، Fetch دوره‌ای، استعلام دستی و یادآوری برای کاربر قابل استفاده است."
             : "درخواست رد شود و به کاربر اعلام شود که فعلاً امکان پشتیبانی خودکار وجود ندارد؟",
         ].join("\n"),
         {
@@ -3186,11 +3446,49 @@ ${escapeHtml(error instanceof Error ? error.message : "خطای نامشخص")}`
     data === SPECIAL_HOME_CALLBACK ||
     data === SPECIAL_ADD_CALLBACK ||
     data === SPECIAL_SUBMIT_CALLBACK ||
-    data === SPECIAL_CANCEL_CALLBACK;
+    data === SPECIAL_CANCEL_CALLBACK ||
+    data.startsWith(SPECIAL_VIEW_PREFIX) ||
+    data.startsWith(SPECIAL_REMINDER_PREFIX) ||
+    data.startsWith(SPECIAL_REMINDER_SET_PREFIX);
   if (specialAction) {
     const authorized = await ensureAuthorizedUser(env, chatId, telegramUserId);
     if (!authorized) {
       await answerCallbackQuery(env, callbackQuery.id);
+      return;
+    }
+    if (data.startsWith(SPECIAL_REMINDER_SET_PREFIX)) {
+      const value = data.slice(SPECIAL_REMINDER_SET_PREFIX.length);
+      const separator = value.lastIndexOf(":");
+      const requestId = separator >= 0 ? value.slice(0, separator) : "";
+      const minutes = separator >= 0 ? Number(value.slice(separator + 1)) : Number.NaN;
+      const request = await setSpecialReminderMinutes(
+        env.DB,
+        requestId,
+        telegramUserId,
+        minutes,
+      );
+      if (!request) {
+        await answerCallbackQuery(env, callbackQuery.id, "اشتراک فعال پیدا نشد.", true);
+        return;
+      }
+      await answerCallbackQuery(
+        env,
+        callbackQuery.id,
+        `یادآوری: ${specialReminderLabel(request.reminder_minutes)}`,
+      );
+      await openSpecialReminderMenu(env, chatId, telegramUserId, requestId);
+      return;
+    }
+    if (data.startsWith(SPECIAL_VIEW_PREFIX)) {
+      const requestId = data.slice(SPECIAL_VIEW_PREFIX.length);
+      await answerCallbackQuery(env, callbackQuery.id, "نمایش آخرین استعلام");
+      await openSpecialLookupResult(env, chatId, telegramUserId, requestId);
+      return;
+    }
+    if (data.startsWith(SPECIAL_REMINDER_PREFIX)) {
+      const requestId = data.slice(SPECIAL_REMINDER_PREFIX.length);
+      await answerCallbackQuery(env, callbackQuery.id, "تنظیم یادآوری");
+      await openSpecialReminderMenu(env, chatId, telegramUserId, requestId);
       return;
     }
     if (data === SPECIAL_HOME_CALLBACK) {

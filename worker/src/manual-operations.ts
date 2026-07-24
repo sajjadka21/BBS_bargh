@@ -20,6 +20,35 @@ function githubRef(env: Env): string {
   return env.GITHUB_REF?.trim() || "main";
 }
 
+function githubDispatchError(status: number, detail: string): string {
+  if (status === 401 || /bad credentials/i.test(detail)) {
+    return (
+      "توکن GitHub نامعتبر، منقضی یا اشتباه ذخیره شده است. " +
+      "مقدار Secret باید خود توکن تولیدشده (مثل github_pat_...) باشد، نه نام توکن. " +
+      "اسکریپت configure_github_actions_token.ps1 را اجرا کنید."
+    );
+  }
+  if (status === 403 || /resource not accessible/i.test(detail)) {
+    return (
+      "توکن به مخزن دسترسی کافی ندارد. در Fine-grained token، مخزن " +
+      "sajjadka21/BBS_bargh و مجوز Actions: Read and write را انتخاب کنید."
+    );
+  }
+  if (status === 404) {
+    return (
+      "مخزن یا فایل Workflow برای این توکن پیدا نشد. دسترسی Repository، " +
+      "نام مخزن و وجود .github/workflows/manual-operations.yml را بررسی کنید."
+    );
+  }
+  if (status === 422) {
+    return (
+      "GitHub درخواست Workflow را نپذیرفت. شاخه main، ورودی‌های workflow_dispatch " +
+      "و فعال‌بودن فایل manual-operations.yml را بررسی کنید."
+    );
+  }
+  return detail || `HTTP ${status}`;
+}
+
 async function saveRun(
   db: D1Database,
   operationId: string,
@@ -95,8 +124,19 @@ export async function dispatchManualOperation(
     }
   }
   if (!response.ok) {
-    const detail = String(body.message ?? raw ?? `HTTP ${response.status}`).slice(0, 800);
-    await saveRun(env.DB, operationId, operationType, requestedBy, "failed", "", detail);
+    const rawDetail = String(
+      body.message ?? raw ?? `HTTP ${response.status}`,
+    ).slice(0, 800);
+    const detail = githubDispatchError(response.status, rawDetail);
+    await saveRun(
+      env.DB,
+      operationId,
+      operationType,
+      requestedBy,
+      "failed",
+      "",
+      `${detail} [GitHub: ${rawDetail}]`,
+    );
     throw new Error(`GitHub Actions: ${detail}`);
   }
 

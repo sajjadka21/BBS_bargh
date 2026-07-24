@@ -29,6 +29,10 @@ export interface SpecialLookupRequest {
   created_at: string;
   updated_at: string;
   decided_at: string | null;
+  reminder_minutes: number;
+  last_fetched_at: string | null;
+  last_fetch_status: string;
+  last_error: string;
 }
 
 function normalizeDigits(value: string): string {
@@ -219,7 +223,8 @@ export async function getSpecialLookupRequest(
   return db.prepare(
     "SELECT request_id, telegram_user_id, chat_id, province, county, request_label, " +
       "bill_id_ciphertext, bill_id_hash, bill_id_last4, status, admin_note, " +
-      "provider_key, created_at, updated_at, decided_at " +
+      "provider_key, created_at, updated_at, decided_at, reminder_minutes, " +
+      "last_fetched_at, last_fetch_status, last_error " +
       "FROM special_lookup_requests WHERE request_id = ?",
   ).bind(requestId).first<SpecialLookupRequest>();
 }
@@ -232,7 +237,8 @@ export async function listSpecialLookupRequests(
   const result = await db.prepare(
     "SELECT request_id, telegram_user_id, chat_id, province, county, request_label, " +
       "bill_id_ciphertext, bill_id_hash, bill_id_last4, status, admin_note, " +
-      "provider_key, created_at, updated_at, decided_at " +
+      "provider_key, created_at, updated_at, decided_at, reminder_minutes, " +
+      "last_fetched_at, last_fetch_status, last_error " +
       "FROM special_lookup_requests WHERE status = ? ORDER BY created_at DESC LIMIT ?",
   ).bind(status, limit).all<SpecialLookupRequest>();
   return result.results;
@@ -246,7 +252,8 @@ export async function listUserSpecialLookupRequests(
   const result = await db.prepare(
     "SELECT request_id, telegram_user_id, chat_id, province, county, request_label, " +
       "bill_id_ciphertext, bill_id_hash, bill_id_last4, status, admin_note, " +
-      "provider_key, created_at, updated_at, decided_at " +
+      "provider_key, created_at, updated_at, decided_at, reminder_minutes, " +
+      "last_fetched_at, last_fetch_status, last_error " +
       "FROM special_lookup_requests WHERE telegram_user_id = ? " +
       "ORDER BY created_at DESC LIMIT ?",
   ).bind(telegramUserId, limit).all<SpecialLookupRequest>();
@@ -256,7 +263,7 @@ export async function listUserSpecialLookupRequests(
 export async function decideSpecialLookupRequest(
   db: D1Database,
   requestId: string,
-  status: "approved" | "rejected",
+  status: "active" | "rejected",
   adminNote = "",
 ): Promise<SpecialLookupRequest> {
   const now = new Date().toISOString();

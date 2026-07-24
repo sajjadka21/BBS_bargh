@@ -1,0 +1,41 @@
+name: Fetch Bargheman special outages
+
+on:
+  schedule:
+    # Iran time (UTC+03:30): 00:30, 06:00, 12:00, 18:00
+    - cron: "0 21 * * *"
+    - cron: "30 2,8,14 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bargheman-special-fetch
+  cancel-in-progress: false
+
+jobs:
+  fetch-special-outages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check requests jdatetime tzdata
+
+      - name: Fetch and synchronize approved bills
+        env:
+          WORKER_SYNC_URL: ${{ secrets.WORKER_SYNC_URL }}
+          WORKER_SYNC_SECRET: ${{ secrets.WORKER_SYNC_SECRET }}
+          BARGHEMAN_AUTHORIZATION: ${{ secrets.BARGHEMAN_AUTHORIZATION }}
+          BARGHEMAN_PLANNED_TEMPLATE: ${{ secrets.BARGHEMAN_PLANNED_TEMPLATE }}
+        run: python ./bargheman_special_fetch.py
